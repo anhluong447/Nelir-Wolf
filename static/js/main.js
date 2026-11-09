@@ -3,6 +3,8 @@ import { api } from './api.js';
 import { $ } from './dom.js';
 import { initInspector } from './inspector.js';
 import { initJobs } from './jobs.js';
+import { initSettings } from './settings.js';
+import { initTools } from './tools.js';
 import { initList, loadRows, loadTypeFilter, move, moveToUnreviewed, renderChips, renderScope } from './list.js';
 import { initSidebar, renderSidebar } from './sidebar.js';
 import { defineAction, emit, listen, runAction, setUi, state } from './state.js';
@@ -72,6 +74,8 @@ async function init() {
   initList();
   initInspector();
   initJobs();
+  initSettings();
+  initTools();
   document.addEventListener('keydown', onKey);
   setUi({});
 
@@ -87,6 +91,7 @@ async function init() {
   listen('project-changed', async () => { state.file = null; state.rowType = ''; await loadProjectData(); });
   listen('stats-dirty', () => refreshStats().catch(() => {}));
   listen('settings-changed', () => loadModel());
+  listen('project-meta-changed', () => loadProjects());
 
   state.projectFilesHas = (f) => state.files.some((x) => x.file === f);
   await Promise.all([loadModel(), loadProjectData()]);
