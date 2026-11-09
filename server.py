@@ -21,7 +21,7 @@ from extractor import WolfTLError
 from openrouter import OpenRouterTranslator, TranslationAPIError, test_connection
 from qa import FLAG_LABELS, qa_flags
 
-bridge = WolfBridge(config.ROOT_DIR)
+bridge = WolfBridge(config.DATA_DIR)
 app = FastAPI(title="Nelir Wolf Translator")
 os.makedirs(config.STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")

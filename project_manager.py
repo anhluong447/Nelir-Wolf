@@ -22,7 +22,7 @@ def _slug(name: str) -> str:
 
 
 class ProjectManager:
-    def __init__(self, root_dir: str = config.ROOT_DIR):
+    def __init__(self, root_dir: str = config.DATA_DIR):
         self.root_dir = root_dir
         self.projects_dir = os.path.join(root_dir, 'projects')
         self.global_db_path = os.path.join(root_dir, 'global_settings.db')

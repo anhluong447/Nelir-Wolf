@@ -5,9 +5,11 @@ import re
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 BIN_DIR = os.path.join(ROOT_DIR, "bin")
 WOLFTL_PATH = os.path.join(BIN_DIR, "WolfTL.exe")
-PROJECTS_DIR = os.path.join(ROOT_DIR, "projects")
+# Where projects/ and global_settings.db live (override for tests / portable setups).
+DATA_DIR = os.environ.get("NELIR_DATA_DIR") or ROOT_DIR
+PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
 STATIC_DIR = os.path.join(ROOT_DIR, "static")
-GLOBAL_DB_PATH = os.path.join(ROOT_DIR, "global_settings.db")
+GLOBAL_DB_PATH = os.path.join(DATA_DIR, "global_settings.db")
 
 HOST = "127.0.0.1"
 PORT = 8765

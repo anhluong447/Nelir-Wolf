@@ -36,7 +36,7 @@ class ProjectContext:
 
 
 class WolfBridge:
-    def __init__(self, root_dir: str = config.ROOT_DIR):
+    def __init__(self, root_dir: str = config.DATA_DIR):
         self.root_dir = root_dir
         self.pm = ProjectManager(root_dir)
         self.ctx: Optional[ProjectContext] = None
