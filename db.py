@@ -72,11 +72,13 @@ def set_meta(conn, key, value):
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, str(value)))
 
 
-def status_counts(conn) -> dict:
-    """Counts used by every stats display. Percent is over unlocked rows only."""
+def status_counts(conn, file: str = None) -> dict:
+    """Counts used by every stats display. Percent is over unlocked rows only.
+    `file` scopes the counts to one dump file."""
     counts = {"total": 0, "empty": 0, "mtl": 0, "translated": 0, "qa": 0, "locked": 0}
+    where, params = ("WHERE file = ?", (file,)) if file else ("", ())
     for status, locked, n in conn.execute(
-        "SELECT status, locked, COUNT(*) FROM translation_rows GROUP BY status, locked"
+        f"SELECT status, locked, COUNT(*) FROM translation_rows {where} GROUP BY status, locked", params
     ):
         counts["total"] += n
         if locked:

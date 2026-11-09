@@ -170,9 +170,9 @@ def delete_project(project_id: str):
 # ROWS
 # ==========================================
 @app.get("/api/stats")
-def get_stats():
+def get_stats(file: Optional[str] = Query(None)):
     with connect(bridge.db_path) as conn:
-        return status_counts(conn)
+        return status_counts(conn, file if file and file != "ALL" else None)
 
 
 @app.get("/api/files")
@@ -181,11 +181,13 @@ def get_files():
         rows = conn.execute("""
             SELECT file, category, COUNT(*),
                    SUM(CASE WHEN status IN (1, 2) AND locked = 0 THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN locked = 0 THEN 1 ELSE 0 END)
+                   SUM(CASE WHEN locked = 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status = 2 AND locked = 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status = 3 AND locked = 0 THEN 1 ELSE 0 END)
             FROM translation_rows GROUP BY file ORDER BY category, file
         """).fetchall()
-    return [{"file": r[0], "category": r[1], "total": r[2], "translated": r[3] or 0, "translatable": r[4] or 0}
-            for r in rows]
+    return [{"file": r[0], "category": r[1], "total": r[2], "translated": r[3] or 0, "translatable": r[4] or 0,
+             "reviewed": r[5] or 0, "qa": r[6] or 0} for r in rows]
 
 
 class QueryParams(BaseModel):
@@ -193,6 +195,7 @@ class QueryParams(BaseModel):
     page_size: int = 50
     file: Optional[str] = None
     category: Optional[str] = None
+    row_type: Optional[str] = None
     status: int = -1
     search: Optional[str] = None
 
@@ -226,6 +229,9 @@ def get_rows(q: QueryParams):
     if q.category:
         conditions.append("category = ?")
         params.append(q.category)
+    if q.row_type:
+        conditions.append("row_type = ?")
+        params.append(q.row_type)
     if q.status in STATUS_FILTERS:
         conditions.append(STATUS_FILTERS[q.status])
     if q.search:
@@ -240,6 +246,21 @@ def get_rows(q: QueryParams):
                             params + [page_size, (max(1, q.page) - 1) * page_size]).fetchall()
     return {"page": q.page, "page_size": page_size, "total": total, "rows": [_row_dict(r) for r in rows],
             "flag_labels": FLAG_LABELS}
+
+
+@app.get("/api/rows/{row_id}/context")
+def get_row_context(row_id: int, n: int = Query(2, ge=0, le=10)):
+    """The row plus up to n neighbouring rows before/after it in the same file."""
+    with connect(bridge.db_path) as conn:
+        row = conn.execute(f"SELECT {ROW_COLUMNS} FROM translation_rows WHERE id = ?", (row_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Không tìm thấy dòng")
+        before = conn.execute(f"SELECT {ROW_COLUMNS} FROM translation_rows WHERE file = ? AND id < ? "
+                              f"ORDER BY id DESC LIMIT ?", (row[1], row_id, n)).fetchall()
+        after = conn.execute(f"SELECT {ROW_COLUMNS} FROM translation_rows WHERE file = ? AND id > ? "
+                             f"ORDER BY id LIMIT ?", (row[1], row_id, n)).fetchall()
+    return {"row": _row_dict(row), "before": [_row_dict(r) for r in reversed(before)],
+            "after": [_row_dict(r) for r in after]}
 
 
 class RowUpdate(BaseModel):
