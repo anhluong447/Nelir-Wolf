@@ -39,6 +39,22 @@ Nelir WOLF RPG Translator is an automated translation and localization platform 
 * **Integrity Validation**: Verifies path-to-source integrity before writing. Patching is blocked if translations introduce new unresolved database queries or orphan labels compared to the source game.
 * **Automatic Rollback Backups**: Backs up `Data/BasicData` and `Data/MapData` prior to the initial patch operation. Full restoration to pristine Japanese data is available at any time without compromising translation database records.
 
+### 8. Translator Workbench Interface
+* **Three-Pane Layout**: A file tree with per-file progress, a segment list with status stripes and control codes rendered as inline chips, and an inspector panel for editing the selected segment.
+* **Inspector Editor**: Shows the source text, the machine suggestion (one-click "use this"), and an editor with live QA while typing (line count, line length, Japanese residue, missing control codes with one-click re-insertion). Also shows the surrounding context (±2 segments in the same file) and matching glossary terms that can be inserted with one click.
+* **Background Batch Jobs**: Batch translation runs in a minimisable job dock, so reviewing and editing can continue while the AI works. Visible rows update as each batch completes.
+* **Appearance**: Dark and light themes, comfortable or compact density, and normal or large text size (Settings > Appearance).
+
+| Key | Action |
+|---|---|
+| `Up` / `Down` (or `J` / `K`) | Previous / next segment |
+| `Alt+Down` / `Alt+Up` | Next / previous segment that still needs work |
+| `Enter` / `Esc` | Focus the editor / return to the list |
+| `Ctrl+Enter` | Save, mark reviewed and move to the next segment |
+| `Ctrl+S` | Save |
+| `Ctrl+Shift+A` / `Ctrl+Shift+U` | AI-translate this segment / use the machine suggestion |
+| `Ctrl+F` / `Ctrl+B` / `?` | Search / toggle the file tree / shortcut sheet |
+
 ---
 
 ## System Requirements
@@ -105,7 +121,7 @@ Nelir-Wolf/
 |       |-- dump_original/          # Unmodified pristine Japanese dump
 |       |-- dump/                   # Active working dump synchronized during patching
 |       `-- game_backup/            # Pristine game backup taken prior to initial patch
-|-- static/                         # Frontend user interface assets (HTML, CSS, JavaScript)
+|-- static/                         # Web UI: index.html, css/ (design tokens, views), js/ (ES modules)
 |-- tests/                          # Automated unit test suite
 |-- config.py                       # Global configurations, defaults, and row type definitions
 |-- db.py                           # SQLite connection pooling and schema definitions

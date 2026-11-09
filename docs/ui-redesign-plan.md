@@ -1,5 +1,7 @@
 # UI redesign plan — "Translator Workbench"
 
+**Status: implemented (milestones 1–7 done, 2026-11-10).**
+
 Date: 2026-11-10 · Scope: `static/` (+ 3 small read-only API additions). No build step,
 no framework: vanilla ES modules served by FastAPI, works offline.
 
