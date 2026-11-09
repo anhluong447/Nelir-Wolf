@@ -47,9 +47,14 @@ themeToggle.addEventListener('click', () => {
 async function loadStats() {
   try {
     const res = await fetch('/api/stats');
+    if (!res.ok) return;
     const data = await res.json();
-    const percent = data.total > 0 ? ((data.completed / data.total) * 100).toFixed(1) : 0;
-    document.getElementById('statsText').innerText = `${formatNum(data.completed)} / ${formatNum(data.total)} (${percent}%)`;
+    const percent = data.percent || 0;
+    const statsEl = document.getElementById('statsText');
+    statsEl.innerText = `${formatNum(data.completed)} / ${formatNum(data.translatable)} (${percent}%)` +
+      (data.qa ? ` · ⚠ ${formatNum(data.qa)}` : '');
+    statsEl.title = `Đã duyệt: ${formatNum(data.translated)} · AI dịch: ${formatNum(data.mtl)} · ` +
+      `Lỗi QA: ${formatNum(data.qa)} · Chưa dịch: ${formatNum(data.empty)} · 🔒 Khóa (không dịch): ${formatNum(data.locked)}`;
     document.getElementById('progressBar').style.width = `${percent}%`;
   } catch (e) {
     console.error('Error loading stats:', e);
@@ -159,7 +164,9 @@ async function loadRows() {
         search: state.search
       })
     });
+    if (!res.ok) throw new Error(await readError(res, 'Lỗi tải dữ liệu'));
     const data = await res.json();
+    FLAG_LABELS = data.flag_labels || FLAG_LABELS;
     state.currentRows = data.rows;
     state.totalRows = data.total;
     state.totalPages = Math.max(1, Math.ceil(data.total / state.pageSize));
@@ -185,8 +192,7 @@ function renderRows(rows) {
     const tr = document.createElement('tr');
     tr.dataset.id = r.id;
 
-    const statusIcons = { 0: '○', 1: '~', 2: '✓' };
-    const statusTitles = { 0: 'Chưa dịch', 1: 'AI dịch (MTL)', 2: 'Đã có bản dịch' };
+    if (r.locked) tr.classList.add('row-locked');
 
     tr.innerHTML = `
       <td class="col-stt" style="color: var(--text-muted); font-size: 11px;">#${r.id}</td>
@@ -194,24 +200,29 @@ function renderRows(rows) {
       <td class="col-raw"><div class="raw-text">${escapeHtml(r.raw)}</div></td>
       <td class="col-mtl"><div class="mtl-text" id="mtl-${r.id}">${escapeHtml(r.mtl || '')}</div></td>
       <td class="col-trans">
-        <textarea class="trans-textarea" id="trans-${r.id}" placeholder="Gõ bản dịch tiếng Việt...">${escapeHtml(r.translated || '')}</textarea>
+        <textarea class="trans-textarea" id="trans-${r.id}" ${r.locked ? 'disabled' : ''}
+          placeholder="${r.locked ? '🔒 Khóa logic của game — giữ nguyên tiếng Nhật' : 'Gõ bản dịch tiếng Việt...'}">${escapeHtml(r.translated || '')}</textarea>
       </td>
       <td class="col-status">
-        <span class="status-badge status-${r.status}" id="status-${r.id}" title="${statusTitles[r.status]}">
-          ${statusIcons[r.status]}
-        </span>
+        <span class="status-badge" id="status-${r.id}"></span>
       </td>
       <td class="col-action">
         <div class="btn-action-group">
+          ${r.locked ? '' : `
           <button class="btn" style="padding: 2px 5px; font-size: 11px;" title="Dịch dòng này bằng AI ngay" onclick="translateSingleRow(${r.id})">⚡</button>
+          <button class="btn" style="padding: 2px 5px; font-size: 11px;" title="Duyệt: đánh dấu bản dịch này là đã kiểm tra" onclick="confirmRow(${r.id})">✔</button>`}
           <button class="btn" style="padding: 2px 5px; font-size: 11px; color: var(--danger);" title="Xóa nhanh bản dịch dòng này" onclick="clearSingleRow(${r.id})">🗑️</button>
         </div>
       </td>
     `;
 
     const textarea = tr.querySelector('.trans-textarea');
-    textarea.addEventListener('blur', () => saveRowTranslation(r.id, textarea.value));
+    textarea.dataset.saved = r.translated || '';
+    textarea.addEventListener('blur', () => {
+      if (textarea.value !== textarea.dataset.saved) saveRowTranslation(r.id, textarea.value);
+    });
     tbody.appendChild(tr);
+    setStatusBadge(r);
   }
 }
 
@@ -224,30 +235,86 @@ function escapeHtml(str) {
             .replace(/'/g, "&#039;");
 }
 
-// Save single row translation
+// Status badge: 0 ○ empty, 1 ~ machine, 2 ✓ reviewed, 3 ⚠ failed QA, 🔒 locked
+const STATUS_ICONS = { 0: '○', 1: '~', 2: '✓', 3: '⚠' };
+const STATUS_TITLES = { 0: 'Chưa dịch', 1: 'AI dịch (chưa duyệt)', 2: 'Đã duyệt', 3: 'AI dịch lỗi QA — cần xem lại' };
+let FLAG_LABELS = {};
+
+function setStatusBadge(r) {
+  const badge = document.getElementById(`status-${r.id}`);
+  if (!badge) return;
+  if (r.locked) {
+    badge.className = 'status-badge status-locked';
+    badge.innerText = '🔒';
+    badge.title = 'Bị khóa: chuỗi này là khóa logic (tra cứu / so sánh / nhãn) nên luôn giữ nguyên bản gốc khi Patch';
+    return;
+  }
+  const flags = (r.qa_flags || []).map(f => `• ${FLAG_LABELS[f] || f}`).join('\n');
+  badge.className = `status-badge status-${r.status}`;
+  badge.innerText = STATUS_ICONS[r.status] ?? '○';
+  badge.title = STATUS_TITLES[r.status] + (flags ? `\n${flags}` : '');
+}
+
+function applyRowUpdate(r) {
+  const mtlEl = document.getElementById(`mtl-${r.id}`);
+  if (mtlEl) mtlEl.innerText = r.mtl || '';
+  const transEl = document.getElementById(`trans-${r.id}`);
+  if (transEl) {
+    transEl.value = r.translated || '';
+    transEl.dataset.saved = r.translated || '';
+  }
+  setStatusBadge(r);
+  const idx = state.currentRows.findIndex(x => x.id === r.id);
+  if (idx >= 0) state.currentRows[idx] = r;
+}
+
+async function readError(res, fallback) {
+  const data = await res.json().catch(() => ({}));
+  return data.detail || data.message || fallback;
+}
+
+// Save single row translation (only called when the text changed)
 async function saveRowTranslation(id, text) {
   try {
-    await fetch('/api/rows/update', {
+    const res = await fetch('/api/rows/update', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, translated: text })
     });
-    const badge = document.getElementById(`status-${id}`);
-    if (badge) {
-      if (text.trim()) {
-        badge.className = 'status-badge status-2';
-        badge.innerText = '✓';
-      } else {
-        const mtlText = document.getElementById(`mtl-${id}`).innerText.trim();
-        badge.className = `status-badge status-${mtlText ? 1 : 0}`;
-        badge.innerText = mtlText ? '~' : '○';
-      }
+    if (!res.ok) {
+      showToast(`❌ ${await readError(res, 'Không lưu được dòng #' + id)}`, 5000);
+      return;
     }
+    const data = await res.json();
+    applyRowUpdate(data.row);
     loadStats();
   } catch (e) {
     console.error('Error saving row:', e);
   }
 }
+
+// Mark rows as reviewed
+async function confirmRows(ids) {
+  const res = await fetch('/api/rows/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids })
+  });
+  if (!res.ok) throw new Error(await readError(res, 'Lỗi khi duyệt'));
+  return (await res.json()).affected;
+}
+
+window.confirmRow = async function(id) {
+  try {
+    const n = await confirmRows([id]);
+    if (!n) { showToast('Dòng này chưa có bản dịch để duyệt.'); return; }
+    showToast(`✔ Đã duyệt dòng #${id}`);
+    loadRows();
+    loadStats();
+  } catch (e) {
+    showToast(`❌ ${e.message}`);
+  }
+};
 
 // Quick translate single row
 window.translateSingleRow = async function(id) {
@@ -262,25 +329,12 @@ window.translateSingleRow = async function(id) {
       body: JSON.stringify({ id })
     });
     if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      alert(`❌ Lỗi dịch dòng #${id}:\n${errData.detail || 'Không thể kết nối tới server AI!'}`);
+      alert(`❌ Lỗi dịch dòng #${id}:\n${await readError(res, 'Không thể kết nối tới server AI!')}`);
       return;
     }
-    const data = await res.json();
-    const mtlEl = document.getElementById(`mtl-${id}`);
-    if (mtlEl) mtlEl.innerText = data.mtl;
-
-    const transEl = document.getElementById(`trans-${id}`);
-    if (transEl) {
-      transEl.value = data.translated;
-    }
-
-    const badge = document.getElementById(`status-${id}`);
-    if (badge) {
-      badge.className = `status-badge status-${data.status}`;
-      badge.innerText = data.status === 2 ? '✓' : '~';
-    }
-    showToast(`Dịch xong dòng #${id}!`);
+    const row = await res.json();
+    applyRowUpdate(row);
+    showToast(row.status === 3 ? `⚠ Dòng #${id} dịch xong nhưng không đạt QA, hãy xem lại.` : `Dịch xong dòng #${id}!`);
     loadStats();
     loadFiles();
   } catch (e) {
@@ -305,11 +359,8 @@ window.clearSingleRow = async function(id) {
     const transEl = document.getElementById(`trans-${id}`);
     if (transEl) transEl.value = '';
 
-    const badge = document.getElementById(`status-${id}`);
-    if (badge) {
-      badge.className = 'status-badge status-0';
-      badge.innerText = '○';
-    }
+    const row = state.currentRows.find(x => x.id === id);
+    if (row) applyRowUpdate({ ...row, mtl: '', translated: '', status: 0, qa_flags: [] });
 
     showToast(`Đã xóa bản dịch dòng #${id}`);
     loadStats();
@@ -460,8 +511,10 @@ document.getElementById('confirmRangeClear').addEventListener('click', async () 
 // ==========================================
 // TYPE CLEAR MODAL HANDLING
 // ==========================================
-const SAFE_TYPES = ['Message', 'Choice', 'DBName', 'DBField', 'SetString', 'Picture', 'GameTitle'];
-const RISKY_TYPES = ['Database', 'JumpLabel', 'SetLabel', 'StringCondition', 'CommonEvent', 'CommonEventByName', 'Comment', 'DebugMessage'];
+// Which types are translatable comes from the server (config.TRANSLATABLE_TYPES);
+// rows that are logic keys are locked server-side and never sent to the AI.
+let TRANSLATABLE_TYPES = new Set();
+const isRiskyType = (type) => !TRANSLATABLE_TYPES.has(type);
 
 function formatTypeLabel(type) {
   if (type === 'Database') return 'Database (Lệnh sự kiện ⚠️)';
@@ -501,9 +554,10 @@ window.openTypeClearModal = async function() {
       const res = await fetch(`/api/types/stats?file=${fileParam}`);
       const stats = await res.json();
       container.innerHTML = '';
+      stats.forEach(t => { if (t.translatable) TRANSLATABLE_TYPES.add(t.row_type); });
 
       for (const t of stats) {
-        const isRisky = RISKY_TYPES.includes(t.row_type);
+        const isRisky = isRiskyType(t.row_type);
         const label = document.createElement('label');
         label.style.cssText = 'display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; padding: 5px 8px; border-radius: 4px; background: rgba(255,255,255,0.03); border: 1px solid var(--border);';
         label.innerHTML = `
@@ -537,7 +591,7 @@ document.getElementById('cancelTypeClear').addEventListener('click', () => {
 
 document.getElementById('btnSelectRiskyTypes').addEventListener('click', () => {
   document.querySelectorAll('.type-clear-checkbox').forEach(cb => {
-    cb.checked = RISKY_TYPES.includes(cb.value);
+    cb.checked = isRiskyType(cb.value);
   });
 });
 document.getElementById('btnSelectAllClearTypes').addEventListener('click', () => {
@@ -638,9 +692,9 @@ document.getElementById('statusFilter').addEventListener('change', (e) => {
 
 // Translate Page (Quick)
 document.getElementById('btnTranslatePage').addEventListener('click', async () => {
-  const ids = state.currentRows.filter(r => r.status === 0).map(r => r.id);
+  const ids = state.currentRows.filter(r => !r.locked && (r.status === 0 || r.status === 3)).map(r => r.id);
   if (ids.length === 0) {
-    showToast('Tất cả các dòng trên trang này đều đã có bản dịch!');
+    showToast('Trang này không còn dòng nào chưa dịch hoặc lỗi QA!');
     return;
   }
 
@@ -655,13 +709,14 @@ document.getElementById('btnTranslatePage').addEventListener('click', async () =
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ row_ids: ids })
     });
+    if (!res.ok) throw new Error(await readError(res, 'Lỗi khi dịch trang'));
     const result = await res.json();
-    showToast(`Đã dịch thành công ${result.translated_count} dòng!`);
+    showToast(`Đã dịch ${result.translated_count} dòng` + (result.qa ? ` (⚠ ${result.qa} dòng lỗi QA)` : '') + '!', 5000);
     loadRows();
     loadStats();
     loadFiles();
   } catch (e) {
-    showToast('Lỗi khi dịch trang!');
+    showToast(`❌ ${e.message || 'Lỗi khi dịch trang!'}`, 6000);
   } finally {
     btn.disabled = false;
     btn.innerText = '⚡ Dịch trang này';
@@ -694,14 +749,17 @@ window.openBatchModal = async function(targetFile) {
     container.innerHTML = '';
 
     for (const t of stats) {
-      const isSafe = SAFE_TYPES.includes(t.row_type);
-      const isRisky = RISKY_TYPES.includes(t.row_type);
+      if (t.translatable) TRANSLATABLE_TYPES.add(t.row_type);
+      const isSafe = t.translatable;
       const label = document.createElement('label');
-      label.style.cssText = 'display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; padding: 4px; border-radius: 4px; background: rgba(255,255,255,0.02);';
+      label.style.cssText = `display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: ${isSafe ? 'pointer' : 'not-allowed'}; padding: 4px; border-radius: 4px; background: rgba(255,255,255,0.02);`;
+      label.title = isSafe
+        ? (t.locked ? `${formatNum(t.locked)} dòng loại này là khóa logic nên bị khóa, sẽ không được dịch.` : '')
+        : 'Loại lệnh logic của engine (tra cứu, so sánh, nhãn...) — luôn bị khóa, không bao giờ dịch.';
       label.innerHTML = `
-        <input type="checkbox" class="batch-type-checkbox" value="${t.row_type}" ${isSafe ? 'checked' : ''} style="width: 14px; height: 14px;">
-        <span style="${isRisky ? 'color: var(--text-muted);' : 'font-weight: 500;'}">${formatTypeLabel(t.row_type)}</span>
-        <span style="font-size: 10px; color: ${t.empty > 0 ? '#fab387' : 'var(--text-muted)'}; margin-left: auto;">(${formatNum(t.empty)} chờ dịch)</span>
+        <input type="checkbox" class="batch-type-checkbox" value="${t.row_type}" ${isSafe ? 'checked' : 'disabled'} style="width: 14px; height: 14px;">
+        <span style="${isSafe ? 'font-weight: 500;' : 'color: var(--text-muted);'}">${isSafe ? '' : '🔒 '}${formatTypeLabel(t.row_type)}</span>
+        <span style="font-size: 10px; color: ${t.empty > 0 ? '#fab387' : 'var(--text-muted)'}; margin-left: auto;">(${formatNum(t.empty)} chờ dịch${t.locked ? ` · 🔒${formatNum(t.locked)}` : ''})</span>
       `;
       container.appendChild(label);
     }
@@ -712,11 +770,11 @@ window.openBatchModal = async function(targetFile) {
 
 document.getElementById('btnBatchSelectSafeTypes').addEventListener('click', () => {
   document.querySelectorAll('.batch-type-checkbox').forEach(cb => {
-    cb.checked = SAFE_TYPES.includes(cb.value);
+    cb.checked = !cb.disabled;
   });
 });
 document.getElementById('btnBatchSelectAllTypes').addEventListener('click', () => {
-  document.querySelectorAll('.batch-type-checkbox').forEach(cb => cb.checked = true);
+  document.querySelectorAll('.batch-type-checkbox').forEach(cb => { if (!cb.disabled) cb.checked = true; });
 });
 
 document.getElementById('btnOpenBatchFile').addEventListener('click', () => {
@@ -817,12 +875,18 @@ document.getElementById('startBatchBtn').addEventListener('click', async () => {
                 rowCard.innerHTML = `
                   <div style="color: var(--text-muted); font-size: 10px; margin-bottom: 2px;">#${it.id}</div>
                   <div style="color: #fab387; margin-bottom: 2px;">🇯🇵 ${escapeHtml(it.raw)}</div>
-                  <div style="color: #a6e3a1; font-weight: 500;">🇻🇳 ${escapeHtml(it.translated)}</div>
+                  <div style="color: ${it.status === 3 ? '#f38ba8' : '#a6e3a1'}; font-weight: 500;">${it.status === 3 ? '⚠' : '🇻🇳'} ${escapeHtml(it.translated)}</div>
                 `;
                 liveFeed.appendChild(rowCard);
               }
               liveFeed.scrollTop = liveFeed.scrollHeight;
             }
+          } else if (event.type === 'memory') {
+            const memCard = document.createElement('div');
+            memCard.style.cssText = 'background: rgba(166, 227, 161, 0.12); border: 1px solid var(--success); color: var(--success); padding: 8px 12px; border-radius: 6px; margin: 8px 0; font-size: 12px; font-weight: 600;';
+            memCard.innerText = event.message;
+            if (!hasClearedFeed) { liveFeed.innerHTML = ''; hasClearedFeed = true; }
+            liveFeed.appendChild(memCard);
           } else if (event.type === 'fallback') {
             const fbCard = document.createElement('div');
             fbCard.style.cssText = 'background: rgba(249, 226, 175, 0.18); border: 1px solid var(--warning); color: var(--warning); padding: 8px 12px; border-radius: 6px; margin: 8px 0; font-size: 12px; font-weight: 600; line-height: 1.4;';

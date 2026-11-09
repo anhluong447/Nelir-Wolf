@@ -67,9 +67,11 @@
           <select id="statusFilter" class="select-box">
             <option value="-1">Tất cả trạng thái</option>
             <option value="0">Chưa dịch (○)</option>
-            <option value="1">AI đã dịch (~)</option>
-            <option value="2">Đã chỉnh sửa (✓)</option>
-            <option value="3">Cần dịch / Đang chờ (○, ~)</option>
+            <option value="1">AI dịch, chưa duyệt (~)</option>
+            <option value="2">Đã duyệt (✓)</option>
+            <option value="3">Lỗi QA, cần xem lại (⚠)</option>
+            <option value="4">Chưa duyệt (○, ~, ⚠)</option>
+            <option value="5">Bị khóa — khóa logic (🔒)</option>
           </select>
         </div>
 
@@ -183,7 +185,7 @@
         <div class="form-group" style="background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
           <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 8px;">
             <input type="checkbox" id="checkAutoFill" checked style="width: 16px; height: 16px;">
-            <span><strong>Tự động điền vào Bản dịch chính thức (TRANSLATED)</strong></span>
+            <span><strong>Tự động điền vào Bản dịch chính thức (TRANSLATED)</strong> — vẫn ở trạng thái "AI dịch, chưa duyệt"</span>
           </label>
           <div style="font-size: 11px; color: var(--text-muted); margin-left: 24px;">
             Chữ tiếng Việt sẽ được điền thẳng vào cột chính thức để bạn có thể Patch ngay vào game mà không cần copy tay.
@@ -191,7 +193,7 @@
 
           <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 12px;">
             <input type="checkbox" id="checkOverwrite" style="width: 16px; height: 16px;">
-            <span>Dịch đè lại cả các dòng đã có bản dịch trước đó (Ghi đè)</span>
+            <span>Dịch đè lại cả các dòng đã có bản dịch (Ghi đè, kể cả dòng đã duyệt)</span>
           </label>
 
           <!-- Type Selection Filter -->

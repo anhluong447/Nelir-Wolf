@@ -478,6 +478,10 @@ tr:hover td {
 .status-0 { color: var(--text-muted); }
 .status-1 { color: var(--warning); }
 .status-2 { color: var(--success); }
+.status-3 { color: var(--danger); cursor: help; }
+.status-locked { font-size: 12px; cursor: help; }
+tr.row-locked td { opacity: 0.55; }
+tr.row-locked .trans-textarea { cursor: not-allowed; }
 
 /* Footer / Pagination */
 .footer {
