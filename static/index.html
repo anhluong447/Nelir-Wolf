@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nelir Wolf Translator - Ghoul x Goula Compagnia</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <span>🐺</span> Nelir Wolf Translator
+      </div>
+      <button class="btn" id="themeToggle" title="Đổi theme sáng/tối">🌓</button>
+    </div>
+    <div class="file-list" id="fileList">
+      <div style="padding: 20px; text-align: center; color: var(--text-muted);">Đang tải danh sách file...</div>
+    </div>
+  </aside>
+
+  <!-- Main Content Area -->
+  <main class="main-content">
+    <!-- Top Header -->
+    <header class="header">
+      <div class="header-top">
+        <div class="project-info">
+          <!-- Project Switcher & Actions -->
+          <div class="project-selector-wrapper">
+            <span style="font-size: 16px;">🎮</span>
+            <select id="projectSelect" class="project-select" title="Chọn game đang dịch">
+              <option value="">Đang tải dự án...</option>
+            </select>
+            <button class="btn btn-sm btn-outline" id="btnExportNel" title="Lưu/Xuất toàn bộ tiến độ dự án ra file .nel">
+              💾 Lưu .nel
+            </button>
+            <button class="btn btn-sm btn-outline" id="btnOpenImportNel" title="Nạp file .nel vào hệ thống">
+              📂 Nạp .nel
+            </button>
+            <button class="btn btn-sm btn-primary" id="btnOpenNewProject" title="Thêm một game WOLF RPG mới">
+              ➕ Game Mới
+            </button>
+          </div>
+
+          <div class="model-pill">
+            <span class="dot"></span>
+            <span id="currentModel">deepseek/deepseek-v4.1-flash-1017</span>
+          </div>
+        </div>
+
+        <div class="progress-box">
+          <span id="statsText" style="font-size: 13px; font-weight: 600;">0 / 0 (0%)</span>
+          <div class="progress-bar-container">
+            <div class="progress-bar-fill" id="progressBar"></div>
+          </div>
+          <button class="btn btn-sm" id="btnOpenSettings" title="Cài đặt AI & API Keys" style="padding: 4px 10px; margin-left: 8px;">
+            ⚙️ Cài đặt
+          </button>
+        </div>
+      </div>
+
+      <!-- Controls Toolbar -->
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <input type="text" id="searchInput" class="search-input" placeholder="🔍 Tìm kiếm văn bản (RAW, Dịch)...">
+          <select id="statusFilter" class="select-box">
+            <option value="-1">Tất cả trạng thái</option>
+            <option value="0">Chưa dịch (○)</option>
+            <option value="1">AI đã dịch (~)</option>
+            <option value="2">Đã chỉnh sửa (✓)</option>
+            <option value="3">Cần dịch / Đang chờ (○, ~)</option>
+          </select>
+        </div>
+
+        <div class="toolbar-right">
+          <button class="btn" id="btnTranslatePage" title="Dịch các dòng chưa dịch trên trang này">
+            ⚡ Dịch trang này
+          </button>
+          <button class="btn btn-primary" id="btnOpenBatchFile" title="Mở bảng dịch toàn bộ file đang chọn">
+            🚀 Dịch Full File này
+          </button>
+          <button class="btn btn-primary" id="btnOpenBatchAll" title="Mở bảng dịch tự động toàn bộ cả game">
+            🌐 Dịch Full Toàn Game
+          </button>
+          
+          <!-- Clear Dropdown -->
+          <div class="dropdown" style="position: relative; display: inline-block;">
+            <button class="btn" id="btnClearDropdownBtn" title="Các tùy chọn xóa nhanh bản dịch">
+              🧹 Xóa... ▾
+            </button>
+            <div class="dropdown-menu" id="clearDropdownMenu">
+              <div class="dropdown-item" onclick="triggerClear('file', 'mtl_only')">
+                🧹 Xóa bản dịch máy (MTL) file này
+              </div>
+              <div class="dropdown-item" onclick="triggerClear('file', 'trans_only')">
+                🧹 Xóa bản dịch chính thức file này
+              </div>
+              <div class="dropdown-item" onclick="triggerClear('file', 'both')">
+                ⚠️ Xóa trắng file này (Reset về 0)
+              </div>
+              <div class="dropdown-item" onclick="openRangeClearModal()">
+                🎯 Xóa theo khoảng ID (#Từ ... #Đến ...)
+              </div>
+              <div class="dropdown-item" onclick="openTypeClearModal()">
+                🏷️ Xóa theo Loại (Type: JumpLabel, Comment...)
+              </div>
+              <div class="dropdown-divider"></div>
+              <div class="dropdown-item" onclick="triggerClear('all', 'mtl_only')">
+                🧹 Xóa toàn bộ MTL của cả game
+              </div>
+              <div class="dropdown-item danger" onclick="triggerClear('all', 'both')">
+                🚨 XÓA TRẮNG TOÀN BỘ GAME (Reset tất cả)
+              </div>
+            </div>
+          </div>
+
+          <button class="btn btn-success" id="btnPatchGame" title="Vá toàn bộ bản dịch tiếng Việt vào game">
+            💾 Patch vào Game
+          </button>
+          <button class="btn" id="btnOpenSettings" title="Cài đặt API Key, Model, Prompt">
+            ⚙️ Cài đặt
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Table Container -->
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-stt">STT</th>
+            <th class="col-type">Loại</th>
+            <th class="col-raw">Văn bản gốc (RAW)</th>
+            <th class="col-mtl">AI MTL (OpenRouter)</th>
+            <th class="col-trans">Bản dịch chính thức (TRANSLATED)</th>
+            <th class="col-status">TT</th>
+            <th class="col-action">⚡</th>
+          </tr>
+        </thead>
+        <tbody id="rowsBody">
+          <tr>
+            <td colspan="7" style="text-align: center; padding: 40px; color: var(--text-muted);">
+              Đang tải dữ liệu thoại...
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Footer / Pagination -->
+    <footer class="footer">
+      <div>
+        Hiển thị <span id="showingText">0 - 0</span> trong tổng số <span id="totalRowsText">0</span> dòng
+      </div>
+      <div class="pagination">
+        <select id="pageSizeSelect" class="select-box" style="padding: 2px 6px;">
+          <option value="25">25 dòng/trang</option>
+          <option value="50" selected>50 dòng/trang</option>
+          <option value="100">100 dòng/trang</option>
+        </select>
+        <button class="btn" id="prevPage">◀ Trang trước</button>
+        <span id="pageInfo" style="font-weight: 600;">Trang 1 / 1</span>
+        <button class="btn" id="nextPage">Trang sau ▶</button>
+      </div>
+    </footer>
+  </main>
+
+  <!-- Batch Translation Modal -->
+  <div class="modal" id="batchModal">
+    <div class="modal-content" style="width: 560px;">
+      <div class="modal-header">
+        <h3 style="font-size: 16px;" id="batchModalTitle">🚀 Dịch Tự Động Hàng Loạt</h3>
+        <button class="btn" id="closeBatchModal" style="border: none; background: transparent; font-size: 16px;">✕</button>
+      </div>
+      
+      <div id="batchSetupView">
+        <div class="form-group">
+          <label>Phạm vi dịch:</label>
+          <div id="batchScopeDesc" style="font-weight: 600; color: var(--accent); font-size: 14px; padding: 6px 0;">
+            File: mps\Map001.json
+          </div>
+        </div>
+
+        <div class="form-group" style="background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 8px;">
+            <input type="checkbox" id="checkAutoFill" checked style="width: 16px; height: 16px;">
+            <span><strong>Tự động điền vào Bản dịch chính thức (TRANSLATED)</strong></span>
+          </label>
+          <div style="font-size: 11px; color: var(--text-muted); margin-left: 24px;">
+            Chữ tiếng Việt sẽ được điền thẳng vào cột chính thức để bạn có thể Patch ngay vào game mà không cần copy tay.
+          </div>
+
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 12px;">
+            <input type="checkbox" id="checkOverwrite" style="width: 16px; height: 16px;">
+            <span>Dịch đè lại cả các dòng đã có bản dịch trước đó (Ghi đè)</span>
+          </label>
+
+          <!-- Type Selection Filter -->
+          <div style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <label style="font-weight: 600; font-size: 13px;">🎯 Chọn loại nội dung muốn dịch:</label>
+              <div style="display: flex; gap: 6px;">
+                <button type="button" class="btn" style="padding: 2px 7px; font-size: 11px; background: rgba(166, 227, 161, 0.15); color: #a6e3a1; border: 1px solid #a6e3a1;" id="btnBatchSelectSafeTypes">🛡️ Chỉ loại an toàn (Khuyên dùng)</button>
+                <button type="button" class="btn" style="padding: 2px 7px; font-size: 11px;" id="btnBatchSelectAllTypes">Tất cả</button>
+              </div>
+            </div>
+            <div id="batchTypesContainer" style="max-height: 150px; overflow-y: auto; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+              <!-- Checkboxes dynamically rendered -->
+            </div>
+          </div>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;">
+          <button class="btn" id="cancelBatchBtn">Hủy</button>
+          <button class="btn btn-primary" id="startBatchBtn" style="padding: 8px 20px; font-size: 14px;">
+            ▶ Bắt đầu Dịch Ngay
+          </button>
+        </div>
+      </div>
+
+      <!-- Live Progress View -->
+      <div id="batchProgressView" style="display: none;">
+        <div style="margin-bottom: 12px;">
+          <div style="display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; margin-bottom: 6px;">
+            <span id="batchProgressText">Đang chuẩn bị kết nối...</span>
+            <span id="batchPercentText">0%</span>
+          </div>
+          <div class="progress-bar-container" style="width: 100%; height: 12px;">
+            <div class="progress-bar-fill" id="batchProgressBar" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <div id="batchCurrentFile" style="font-size: 12px; color: var(--text-muted); margin-bottom: 10px; word-break: break-all;">
+          Đang xử lý...
+        </div>
+
+        <!-- Real-time Live Output Feed -->
+        <div style="font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px;">
+          📺 Kết quả dịch thời gian thực:
+        </div>
+        <div id="batchLiveFeed" style="height: 180px; overflow-y: auto; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 12px; margin-bottom: 16px; font-family: 'Segoe UI', sans-serif;">
+          <div style="color: var(--text-muted); text-align: center; padding: 20px;">Đang đợi kết quả dịch từ AI...</div>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 8px;">
+          <button class="btn btn-danger" id="stopBatchBtn" style="background: var(--danger); color: white; border: none;">
+            ⏹ Dừng dịch (Stop)
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Range Clear Modal -->
+  <div class="modal" id="rangeClearModal">
+    <div class="modal-content" style="width: 480px;">
+      <div class="modal-header">
+        <h3 style="font-size: 16px;">🎯 Xóa Bản Dịch Theo Khoảng ID</h3>
+        <button class="btn" id="closeRangeClearModal" style="border: none; background: transparent; font-size: 16px;">✕</button>
+      </div>
+
+      <div class="form-group" style="background: var(--bg-card); padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border); margin-bottom: 14px;">
+        <label style="font-weight: 600; margin-bottom: 8px; display: block;">Phạm vi áp dụng ID:</label>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+          <input type="radio" name="rangeClearScope" value="all" checked id="scopeRangeAll">
+          <span>🌐 <strong>Toàn bộ Game (Xuyên suốt mọi file)</strong> <span style="font-size: 11px; color: var(--text-muted);">(ID chạy liên tục từ #1 đến hết game)</span></span>
+        </label>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;" id="labelScopeRangeFile">
+          <input type="radio" name="rangeClearScope" value="file" id="scopeRangeFile">
+          <span id="scopeRangeFileText">📁 Chỉ áp dụng trong file hiện tại</span>
+        </label>
+      </div>
+
+      <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+        <div style="flex: 1;">
+          <label style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px;">Từ ID (#):</label>
+          <input type="number" id="inputRangeStart" class="form-control" placeholder="Ví dụ: 100">
+        </div>
+        <div style="flex: 1;">
+          <label style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px;">Đến ID (#):</label>
+          <input type="number" id="inputRangeEnd" class="form-control" placeholder="Ví dụ: 250">
+        </div>
+      </div>
+
+      <div class="form-group" style="background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
+        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Loại dữ liệu cần xóa:</label>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+          <input type="radio" name="rangeClearType" value="both" checked>
+          <span>Xóa trắng cả MTL & TRANSLATED (Reset về 0)</span>
+        </label>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+          <input type="radio" name="rangeClearType" value="mtl_only">
+          <span>Chỉ xóa bản dịch máy (MTL)</span>
+        </label>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+          <input type="radio" name="rangeClearType" value="trans_only">
+          <span>Chỉ xóa bản dịch chính thức (TRANSLATED)</span>
+        </label>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;">
+        <button class="btn" id="cancelRangeClear">Hủy</button>
+        <button class="btn btn-danger" id="confirmRangeClear" style="background: var(--danger); color: white; border: none;">
+          🗑️ Xóa Khoảng Này
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Type Clear Modal -->
+  <div class="modal" id="typeClearModal">
+    <div class="modal-content" style="width: 520px;">
+      <div class="modal-header">
+        <h3 style="font-size: 16px;">🏷️ Xóa Bản Dịch Theo Loại (Type)</h3>
+        <button class="btn" id="closeTypeClearModal" style="border: none; background: transparent; font-size: 16px;">✕</button>
+      </div>
+
+      <div class="form-group">
+        <label>Phạm vi áp dụng:</label>
+        <select id="typeClearScopeSelect" class="form-control" style="font-size: 13px;">
+          <option value="ALL">🌐 Toàn bộ tất cả các file trong game</option>
+          <option value="CURRENT">📄 Chỉ trong file đang chọn</option>
+        </select>
+        <div id="typeClearScopeText" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;"></div>
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <label style="font-weight: 600; font-size: 12px;">Chọn các loại muốn xóa:</label>
+          <div style="display: flex; gap: 6px;">
+            <button type="button" class="btn" style="padding: 2px 7px; font-size: 11px; background: rgba(243, 139, 168, 0.15); color: #f38ba8; border: 1px solid #f38ba8;" id="btnSelectRiskyTypes">
+              🚨 Chọn loại nhãn nguy hiểm (JumpLabel, SetLabel...)
+            </button>
+            <button type="button" class="btn" style="padding: 2px 7px; font-size: 11px;" id="btnSelectAllClearTypes">Tất cả</button>
+            <button type="button" class="btn" style="padding: 2px 7px; font-size: 11px;" id="btnUnselectAllClearTypes">Bỏ chọn</button>
+          </div>
+        </div>
+        <div id="typeClearListContainer" style="max-height: 180px; overflow-y: auto; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+
+      <div class="form-group" style="background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
+        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Kiểu xóa:</label>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+          <input type="radio" name="typeClearMode" value="both" checked>
+          <span>Xóa trắng cả MTL & TRANSLATED (Khôi phục tiếng Nhật gốc)</span>
+        </label>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+          <input type="radio" name="typeClearMode" value="trans_only">
+          <span>Chỉ xóa bản dịch chính thức (TRANSLATED)</span>
+        </label>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+          <input type="radio" name="typeClearMode" value="mtl_only">
+          <span>Chỉ xóa bản dịch máy (MTL)</span>
+        </label>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;">
+        <button class="btn" id="cancelTypeClear">Hủy</button>
+        <button class="btn btn-danger" id="confirmTypeClear" style="background: var(--danger); color: white; border: none;">
+          🗑️ Xóa Các Loại Đã Chọn
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal" id="settingsModal">
+    <div class="modal-content" style="width: 620px; max-height: 90vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3 style="font-size: 16px;">⚙️ Cấu Hình Nhà Cung Cấp & Model AI</h3>
+        <button class="btn" id="closeSettingsModal" style="border: none; background: transparent; font-size: 16px;">✕</button>
+      </div>
+
+      <!-- Provider Tabs -->
+      <div class="provider-tabs">
+        <button type="button" class="provider-tab-btn active" data-provider="gemini" id="tabGemini">
+          ✨ Google Gemini
+        </button>
+        <button type="button" class="provider-tab-btn" data-provider="kaggle" id="tabKaggle">
+          💻 Kaggle / Local
+        </button>
+        <button type="button" class="provider-tab-btn" data-provider="openrouter" id="tabOpenRouter">
+          🌐 OpenRouter
+        </button>
+      </div>
+
+      <!-- TAB 1: GOOGLE GEMINI -->
+      <div class="provider-tab-panel active" id="panelGemini">
+        <div style="background: rgba(137, 180, 250, 0.1); border: 1px solid var(--accent); border-radius: 6px; padding: 10px 12px; font-size: 12px; margin-bottom: 14px; line-height: 1.5;">
+          🚀 <strong>Google AI Studio Free Tier:</strong> 1,500 requests/ngày.<br>
+          🔄 <strong>Cơ chế xoay tua (Rotation):</strong> Mỗi batch mới <em>luôn ưu tiên chạy NV1</em>. Nếu dính Rate Limit (429), tự động chuyển sang NV2 ➔ NV3 cho batch đó, và lập tức trở lại NV1 ngay khi quota hồi phục!
+        </div>
+
+        <!-- Multi-Key Manager -->
+        <div class="form-group" style="background: var(--bg-card); padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label style="font-weight: 700; font-size: 13px; color: var(--accent); margin: 0;">
+              🔑 Danh sách API Key xoay tua (Google AI Studio):
+            </label>
+            <span style="font-size: 11px; color: var(--text-muted);" id="geminiKeyCountText">0 Key</span>
+          </div>
+
+          <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.4;">
+            Mỗi batch sẽ chạy trên Key đang hoạt động. Khi key này <strong>hết hạn mức ngày ở tất cả model</strong>, hệ thống sẽ <strong>tự động chuyển sang Key tiếp theo</strong> từ trên xuống dưới!
+          </div>
+
+          <!-- Add Key Input -->
+          <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+            <input type="password" id="inputNewGeminiKey" class="form-control" placeholder="Dán Google API Key mới vào đây (AIzaSy...)" style="font-size: 12px;">
+            <button type="button" class="btn btn-primary" id="btnAddGeminiKey" style="padding: 6px 14px; white-space: nowrap; font-size: 12px;">
+              ➕ Thêm Key
+            </button>
+          </div>
+
+          <!-- Key List Container -->
+          <div id="geminiKeysContainer" style="max-height: 160px; overflow-y: auto; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 6px; display: flex; flex-direction: column; gap: 6px;">
+            <!-- Populated dynamically by app.js -->
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Base URL Endpoint:</label>
+          <input type="text" id="geminiBaseUrl" class="form-control" value="https://generativelanguage.googleapis.com/v1beta/openai">
+        </div>
+
+        <!-- Priority 1 -->
+        <div class="form-group" style="background: var(--bg-card); padding: 10px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="display: flex; align-items: center; justify-content: space-between;">
+            <span><span class="priority-badge badge-nv1">NV 1</span> <strong>Nguyện Vọng 1 (Ưu tiên số 1 - Luôn chạy đầu tiên):</strong></span>
+          </label>
+          <div style="display: flex; gap: 8px; margin-top: 4px;">
+            <select id="geminiModel1Select" class="form-control" style="flex: 1;">
+              <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (10/10 Chất lượng, 500 RPD, 15 RPM - Khuyên dùng)</option>
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview (Gemini 3 Flash - Bản dịch thông minh nhất 10/10)</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash (Chuẩn mực, mượt mà, 9.5/10)</option>
+              <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (500 RPD, 15 RPM, 9/10)</option>
+              <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (Tốc độ cao)</option>
+              <option value="gemini-3.6-flash">gemini-3.6-flash (Trau chuốt văn phong)</option>
+              <option value="gemini-3.8-flash">gemini-3.8-flash (Reasoning/Thinking chậm)</option>
+              <option value="custom">-- Tự nhập tên model khác... --</option>
+            </select>
+            <input type="text" id="geminiModel1Input" class="form-control" style="flex: 1; display: none;" placeholder="Nhập tên model...">
+          </div>
+        </div>
+
+        <!-- Priority 2 -->
+        <div class="form-group" style="background: var(--bg-card); padding: 10px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="display: flex; align-items: center; justify-content: space-between;">
+            <span><span class="priority-badge badge-nv2">NV 2</span> <strong>Nguyện Vọng 2 (Dự phòng khi NV1 chạm Rate Limit):</strong></span>
+          </label>
+          <div style="display: flex; gap: 8px; margin-top: 4px;">
+            <select id="geminiModel2Select" class="form-control" style="flex: 1;">
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview (Gemini 3 Flash - Bản dịch thông minh nhất 10/10)</option>
+              <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (10/10 Chất lượng, 500 RPD)</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash (Chuẩn mực, mượt mà)</option>
+              <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (500 RPD, 15 RPM)</option>
+              <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (Tốc độ cao)</option>
+              <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+              <option value="gemini-3.8-flash">gemini-3.8-flash</option>
+              <option value="custom">-- Tự nhập tên model khác... --</option>
+            </select>
+            <input type="text" id="geminiModel2Input" class="form-control" style="flex: 1; display: none;" placeholder="Nhập tên model...">
+          </div>
+        </div>
+
+        <!-- Priority 3 -->
+        <div class="form-group" style="background: var(--bg-card); padding: 10px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="display: flex; align-items: center; justify-content: space-between;">
+            <span><span class="priority-badge badge-nv3">NV 3</span> <strong>Nguyện Vọng 3 (Dự phòng cấp 2):</strong></span>
+          </label>
+          <div style="display: flex; gap: 8px; margin-top: 4px;">
+            <select id="geminiModel3Select" class="form-control" style="flex: 1;">
+              <option value="gemini-2.5-flash">gemini-2.5-flash (Chuẩn mực, mượt mà)</option>
+              <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (500 RPD)</option>
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+              <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (500 RPD, 15 RPM)</option>
+              <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+              <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+              <option value="custom">-- Tự nhập tên model khác... --</option>
+            </select>
+            <input type="text" id="geminiModel3Input" class="form-control" style="flex: 1; display: none;" placeholder="Nhập tên model...">
+          </div>
+        </div>
+
+        <!-- Priority 4 -->
+        <div class="form-group" style="background: var(--bg-card); padding: 10px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="display: flex; align-items: center; justify-content: space-between;">
+            <span><span class="priority-badge badge-nv4">NV 4</span> <strong>Nguyện Vọng 4 (Dự phòng cấp 3):</strong></span>
+          </label>
+          <div style="display: flex; gap: 8px; margin-top: 4px;">
+            <select id="geminiModel4Select" class="form-control" style="flex: 1;">
+              <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (500 RPD, 15 RPM - Cứu cánh)</option>
+              <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+              <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+              <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+              <option value="custom">-- Tự nhập tên model khác... --</option>
+            </select>
+            <input type="text" id="geminiModel4Input" class="form-control" style="flex: 1; display: none;" placeholder="Nhập tên model...">
+          </div>
+        </div>
+
+        <!-- Priority 5 -->
+        <div class="form-group" style="background: var(--bg-card); padding: 10px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="display: flex; align-items: center; justify-content: space-between;">
+            <span><span class="priority-badge badge-nv5">NV 5</span> <strong>Nguyện Vọng 5 (Dự phòng cuối cùng):</strong></span>
+          </label>
+          <div style="display: flex; gap: 8px; margin-top: 4px;">
+            <select id="geminiModel5Select" class="form-control" style="flex: 1;">
+              <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (Dự phòng khẩn cấp)</option>
+              <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+              <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+              <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+              <option value="custom">-- Tự nhập tên model khác... --</option>
+            </select>
+            <input type="text" id="geminiModel5Input" class="form-control" style="flex: 1; display: none;" placeholder="Nhập tên model...">
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 2: KAGGLE / LOCAL -->
+      <div class="provider-tab-panel" id="panelKaggle">
+        <div style="background: rgba(249, 226, 175, 0.1); border: 1px solid var(--warning); border-radius: 6px; padding: 10px 12px; font-size: 12px; margin-bottom: 14px; line-height: 1.5;">
+          💻 <strong>Ollama Local / Kaggle Cloudflare Tunnel:</strong><br>
+          Chạy model offline trên GPU T4 / RTX mà không tốn phí hay giới hạn quota.
+        </div>
+        <div class="form-group">
+          <label>Base URL (Cloudflare Tunnel hoặc Localhost):</label>
+          <input type="text" id="kaggleBaseUrl" class="form-control" placeholder="https://xxxx.trycloudflare.com/v1 hoặc http://localhost:11434/v1">
+        </div>
+        <div class="form-group">
+          <label>API Key (Ollama không yêu cầu key, để 'local'):</label>
+          <input type="text" id="kaggleApiKey" class="form-control" value="local">
+        </div>
+        <div class="form-group">
+          <label>Model Ollama:</label>
+          <input type="text" id="kaggleModel" class="form-control" placeholder="qwen2.5:32b hoặc qwen2.5:14b">
+        </div>
+      </div>
+
+      <!-- TAB 3: OPENROUTER -->
+      <div class="provider-tab-panel" id="panelOpenRouter">
+        <div style="background: rgba(166, 227, 161, 0.1); border: 1px solid var(--success); border-radius: 6px; padding: 10px 12px; font-size: 12px; margin-bottom: 14px; line-height: 1.5;">
+          🌐 <strong>OpenRouter Cloud Hub:</strong><br>
+          Kết nối hàng trăm model mã nguồn mở & thương mại qua một API Key duy nhất.
+        </div>
+        <div class="form-group">
+          <label>Base URL:</label>
+          <input type="text" id="openrouterBaseUrl" class="form-control" value="https://openrouter.ai/api/v1">
+        </div>
+        <div class="form-group">
+          <label>OpenRouter API Key:</label>
+          <input type="password" id="openrouterApiKey" class="form-control" placeholder="sk-or-v1-...">
+        </div>
+        <div class="form-group">
+          <label>Model OpenRouter:</label>
+          <input type="text" id="openrouterModel" class="form-control" placeholder="deepseek/deepseek-v4.1-flash-1017">
+        </div>
+      </div>
+
+      <!-- COMMON SETTINGS -->
+      <div style="border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px;">
+        <div class="form-group">
+          <label>Số dòng dịch mỗi batch (Batch Size):</label>
+          <input type="number" id="inputBatchSize" class="form-control" value="15" min="1" max="50">
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+            Gợi ý: Gemini & OpenRouter khuyên dùng 10-15 dòng/batch để tối ưu tốc độ và tránh Rate Limit RPM.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>System Prompt (Chỉ dẫn dịch thuật):</label>
+          <textarea id="inputSystemPrompt" class="form-control" rows="4" style="resize: vertical; font-size: 12px;"></textarea>
+        </div>
+      </div>
+
+      <!-- Test Connection Result Box -->
+      <div id="testConnectionBox" style="display: none; padding: 12px; border-radius: 6px; font-size: 12px; line-height: 1.5; margin-top: 14px; white-space: pre-wrap;"></div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 20px;">
+        <button class="btn" id="btnTestConnection" style="background: rgba(137, 180, 250, 0.15); color: var(--accent); border: 1px solid var(--accent);">
+          🔌 Kiểm tra Provider hiện tại
+        </button>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn" id="cancelSettings">Hủy</button>
+          <button class="btn btn-primary" id="saveSettings">💾 Lưu cài đặt</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Project Modal -->
+  <div class="modal" id="newProjectModal">
+    <div class="modal-content" style="width: 540px;">
+      <div class="modal-header">
+        <h3 style="font-size: 16px;">➕ Thêm Dự Án Game WOLF RPG Mới</h3>
+        <button class="btn" id="closeNewProjectModal" style="border: none; background: transparent; font-size: 16px;">✕</button>
+      </div>
+      <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px; line-height: 1.5;">
+        Hệ thống sẽ tạo không gian dự án độc lập, chạy <code>WolfTL.exe --create</code> bóc tách kịch bản của game mới mà <strong>không ảnh hưởng tới các game khác</strong>.
+      </div>
+
+      <div class="form-group">
+        <label style="font-weight: 600;">Tên Game / Tên Dự Án:</label>
+        <input type="text" id="inputNewProjectName" class="form-control" placeholder="Ví dụ: Mad Father / Misao / Tên Game...">
+      </div>
+
+      <div class="form-group">
+        <label style="font-weight: 600;">Đường dẫn thư mục cài đặt Game (hoặc thư mục Data):</label>
+        <input type="text" id="inputNewProjectGamePath" class="form-control" placeholder="Ví dụ: E:\Games\MyNewGame">
+        <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+          💡 Gợi ý: Bạn chỉ cần dán đường dẫn thư mục chứa game (chứa Game.exe hoặc thư mục Data). App sẽ tự động nhận diện.
+        </div>
+      </div>
+
+      <div id="newProjectStatusBox" style="display: none; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 12px;"></div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;">
+        <button class="btn" id="cancelNewProjectBtn">Hủy</button>
+        <button class="btn btn-primary" id="confirmNewProjectBtn" style="padding: 8px 18px;">
+          🚀 Khởi Tạo & Trích Xuất Dữ Liệu
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import .NEL Modal -->
+  <div class="modal" id="importNelModal">
+    <div class="modal-content" style="width: 520px;">
+      <div class="modal-header">
+        <h3 style="font-size: 16px;">📂 Nạp Gói Dự Án (.nel)</h3>
+        <button class="btn" id="closeImportNelModal" style="border: none; background: transparent; font-size: 16px;">✕</button>
+      </div>
+      <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px; line-height: 1.5;">
+        Nạp toàn bộ cơ sở dữ liệu dịch thuật từ file gói <code>.nel</code> (Nelir Project File).
+      </div>
+
+      <div class="form-group">
+        <label style="font-weight: 600;">Chọn file gói dự án (.nel):</label>
+        <input type="file" id="inputNelFile" accept=".nel,.zip" class="form-control" style="font-size: 12px; padding: 8px;">
+      </div>
+
+      <div class="form-group">
+        <label style="font-weight: 600;">Đường dẫn thư mục Game trên máy này (Tùy chọn):</label>
+        <input type="text" id="inputImportGamePath" class="form-control" placeholder="Để trống nếu muốn giữ nguyên đường dẫn gốc trong file .nel">
+        <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+          Nếu bạn chia sẻ file .nel sang máy khác, hãy dán đường dẫn thư mục game trên máy mới này để có thể bấm nút <strong>Patch vào Game</strong> ngay lập tức.
+        </div>
+      </div>
+
+      <div id="importNelStatusBox" style="display: none; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 12px;"></div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;">
+        <button class="btn" id="cancelImportNelBtn">Hủy</button>
+        <button class="btn btn-success" id="confirmImportNelBtn" style="padding: 8px 18px;">
+          📥 Nạp Dự Án Ngay
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast" id="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

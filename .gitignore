@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite Databases & Backups (Protects API keys and massive binary databases)
+global_settings.db
+*.db
+*.db-journal
+*.sqlite3
+
+# Large dump folders & save files
+dump/
+projects/*/dump/
+*.nel
+
+# Scratch & temporary test files
+scratch_*.py
+inspect_*.py
+test_*.py
+temp_*/
+
+# OS generated files
+.DS_Store
+Thumbs.db
