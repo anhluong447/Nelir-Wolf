@@ -963,15 +963,25 @@ document.getElementById('btnPatchGame').addEventListener('click', async () => {
   showToast('Đang áp dụng bản dịch tiếng Việt vào game...');
 
   try {
-    const res = await fetch('/api/patch', { method: 'POST' });
-    const result = await res.json();
+    let result = await postJson('/api/patch', { force: false });
+    if (!result.success && result.blocked) {
+      const detail = (result.errors || []).slice(0, 15).join('\n');
+      const more = result.errors.length > 15 ? `\n... và ${result.errors.length - 15} lỗi khác` : '';
+      if (confirm(`⛔ ${result.message}\n\n${detail}${more}\n\nVẫn muốn ÉP vá vào game? (Không khuyến khích)`)) {
+        result = await postJson('/api/patch', { force: true });
+      } else {
+        return;
+      }
+    }
     if (result.success) {
-      alert(`🎉 ${result.message}\nBây giờ bạn có thể mở game lên và trải nghiệm ngay!`);
+      const skipped = (result.mismatched || []).length;
+      alert(`🎉 ${result.message}` + (skipped ? `\n\nVí dụ dòng bị bỏ qua:\n${result.mismatched.slice(0, 5).join('\n')}` : '') +
+        '\n\nBây giờ bạn có thể mở game lên và trải nghiệm ngay!');
     } else {
       alert(`⚠️ ${result.message}`);
     }
   } catch (e) {
-    alert('Lỗi khi gọi lệnh vá game!');
+    alert(`❌ Lỗi khi vá game: ${e.message}`);
   } finally {
     btn.disabled = false;
     btn.innerText = '💾 Patch vào Game';
@@ -1206,6 +1216,7 @@ document.getElementById('btnOpenSettings').addEventListener('click', async () =>
     // Common
     document.getElementById('inputBatchSize').value = s.batch_size || '15';
     document.getElementById('inputSystemPrompt').value = s.system_prompt || '';
+    document.getElementById('inputQaMaxLine').value = s.qa_max_line_chars ?? '56';
 
     // Switch to active tab
     switchProviderTab(s.active_provider || 'gemini');
@@ -1295,6 +1306,7 @@ document.getElementById('saveSettings').addEventListener('click', async () => {
     active_provider: currentActiveProvider,
     batch_size: document.getElementById('inputBatchSize').value.trim(),
     system_prompt: document.getElementById('inputSystemPrompt').value.trim(),
+    qa_max_line_chars: document.getElementById('inputQaMaxLine').value.trim(),
     gemini: {
       base_url: document.getElementById('geminiBaseUrl').value.trim(),
       api_key: activeGeminiKey,
@@ -1319,17 +1331,13 @@ document.getElementById('saveSettings').addEventListener('click', async () => {
   };
 
   try {
-    await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    await postJson('/api/settings', payload);
 
     settingsModal.classList.remove('active');
     showToast('Đã lưu cấu hình danh sách Key & xoay tua model!');
     loadSettings();
   } catch (err) {
-    showToast('Lỗi khi lưu cài đặt!');
+    showToast(`❌ Lỗi khi lưu cài đặt: ${err.message}`, 5000);
   }
 });
 
@@ -1369,6 +1377,8 @@ async function loadProjects() {
 
     if (currentProjects.length === 0) {
       select.innerHTML = '<option value="">(Chưa có dự án nào)</option>';
+      document.getElementById('fileList').innerHTML =
+        '<div style="padding: 20px; text-align: center; color: var(--text-muted);">Chưa có dự án. Bấm "➕ Game Mới" hoặc "📂 Nạp .nel" để bắt đầu.</div>';
       return;
     }
 
@@ -1416,7 +1426,7 @@ if (projectSelectEl) {
         await loadRows();
       }
     } catch (err) {
-      showToast('Lỗi khi chuyển đổi dự án!');
+      showToast(`Lỗi khi chuyển đổi dự án: ${err.message}`);
     }
   });
 }
@@ -1589,6 +1599,7 @@ if (confirmImportNelBtn) {
       }
 
       showToast(`Đã nạp thành công dự án: ${result.project.name}!`);
+      if (result.warning) alert(`⚠️ ${result.warning}`);
       importNelModal.classList.remove('active');
       state.file = null;
       state.category = null;
@@ -1607,3 +1618,121 @@ if (confirmImportNelBtn) {
     }
   });
 }
+
+// ==========================================
+// TOOLS: glossary, memory, QA, validate, restore
+// ==========================================
+const toolsBtn = document.getElementById('btnToolsDropdownBtn');
+const toolsMenu = document.getElementById('toolsDropdownMenu');
+if (toolsBtn && toolsMenu) {
+  toolsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toolsMenu.classList.toggle('show');
+  });
+  document.addEventListener('click', () => toolsMenu.classList.remove('show'));
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  if (!res.ok) throw new Error(await readError(res, `Lỗi ${res.status}`));
+  return res.json();
+}
+
+function refreshAll() {
+  loadProjects();
+  loadStats();
+  loadFiles();
+  loadRows();
+}
+
+window.runToolAction = async function(action) {
+  toolsMenu.classList.remove('show');
+  try {
+    if (action === 'unify') {
+      if (!confirm('Các câu gốc giống hệt nhau nhưng đang có nhiều bản dịch khác nhau sẽ được đồng bộ về 1 bản\n(ưu tiên bản đã duyệt, sau đó bản phổ biến nhất). Dòng đã duyệt (✓) không bị thay đổi.\n\nTiếp tục?')) return;
+      const r = await postJson('/api/tm/unify');
+      alert(`♻️ Đã đồng bộ ${formatNum(r.updated)} dòng thuộc ${formatNum(r.groups)} nhóm câu trùng.`);
+    } else if (action === 'qa') {
+      const r = await postJson('/api/qa/recheck');
+      const changes = Object.entries(r.changes || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
+      alert(`🔍 Đã chạy lại QA. Thay đổi trạng thái: ${changes || 'không có'}`);
+    } else if (action === 'validate') {
+      const res = await fetch('/api/validate');
+      if (!res.ok) throw new Error(await readError(res, 'Lỗi kiểm tra'));
+      const r = await res.json();
+      const qa = Object.entries(r.qa_counts || {}).map(([k, v]) => `  • ${FLAG_LABELS[k] || k}: ${formatNum(v)}`).join('\n');
+      alert(
+        `🧪 KẾT QUẢ KIỂM TRA DỰ ÁN\n\n` +
+        `Lỗi khóa logic (chuỗi khóa bị dịch): ${r.key_errors.length}\n` +
+        (r.key_errors.slice(0, 10).join('\n') || '') +
+        `\n\nLỗi sẵn có trong game gốc (không do bản dịch): ${r.dump_errors_in_original.length}\n` +
+        `\nThống kê QA của các dòng đã dịch:\n${qa || '  (không có)'}`
+      );
+    } else if (action === 'gamepath') {
+      const path = prompt('Nhập đường dẫn thư mục game (chứa Game.exe và thư mục Data):');
+      if (!path) return;
+      const r = await postJson('/api/projects/game-path', { game_path: path });
+      showToast(`📂 Đã cập nhật đường dẫn game: ${r.project.game_data_path}`, 5000);
+    } else if (action === 'reextract' || action === 'reextract_game') {
+      const fromGame = action === 'reextract_game';
+      const msg = fromGame
+        ? 'Trích xuất lại từ dữ liệu game (dùng khi game ra bản cập nhật).\n\nYÊU CẦU: game phải là bản GỐC chưa vá (nếu đã vá, hãy dùng "Khôi phục văn bản gốc" trước). Tool sẽ từ chối nếu phát hiện game đã bị vá.\n\nBản dịch của các câu không đổi được giữ nguyên. Tiếp tục?'
+        : 'Đồng bộ lại danh sách chuỗi từ dump gốc của dự án. Bản dịch hiện có được giữ nguyên. Tiếp tục?';
+      if (!confirm(msg)) return;
+      const r = await postJson('/api/projects/reextract', { from_game: fromGame });
+      const s = r.stats;
+      alert(`🔄 Đồng bộ xong: giữ ${formatNum(s.kept)}, thay đổi ${formatNum(s.changed)}, thêm mới ${formatNum(s.inserted)}, xóa ${formatNum(s.deleted)} dòng.`);
+    } else if (action === 'restore') {
+      if (!confirm('↩️ Ghi lại TOÀN BỘ văn bản gốc tiếng Nhật vào game (gỡ bản dịch khỏi game).\nDữ liệu dịch trong dự án KHÔNG bị xóa, bạn có thể Patch lại bất cứ lúc nào.\n\nTiếp tục?')) return;
+      const r = await postJson('/api/patch/restore');
+      alert(r.success ? `✅ ${r.message}` : `⚠️ ${r.message}`);
+    }
+    refreshAll();
+  } catch (e) {
+    alert(`❌ ${e.message}`);
+  }
+};
+
+// Glossary modal
+const glossaryModal = document.getElementById('glossaryModal');
+window.openGlossaryModal = async function() {
+  toolsMenu.classList.remove('show');
+  try {
+    const res = await fetch('/api/glossary');
+    if (!res.ok) throw new Error(await readError(res, 'Không tải được glossary'));
+    const data = await res.json();
+    document.getElementById('glossaryText').value = data.entries
+      .map(e => `${e.src} = ${e.dst}${e.note ? ` # ${e.note}` : ''}`).join('\n');
+    glossaryModal.classList.add('active');
+  } catch (e) {
+    alert(`❌ ${e.message}`);
+  }
+};
+document.getElementById('closeGlossaryModal').addEventListener('click', () => glossaryModal.classList.remove('active'));
+document.getElementById('cancelGlossary').addEventListener('click', () => glossaryModal.classList.remove('active'));
+document.getElementById('saveGlossary').addEventListener('click', async () => {
+  const entries = [];
+  const bad = [];
+  document.getElementById('glossaryText').value.split('\n').forEach((line, i) => {
+    if (!line.trim()) return;
+    const [body, ...noteParts] = line.split('#');
+    const eq = body.indexOf('=');
+    if (eq < 0) { bad.push(i + 1); return; }
+    const src = body.slice(0, eq).trim();
+    const dst = body.slice(eq + 1).trim();
+    if (!src || !dst) { bad.push(i + 1); return; }
+    entries.push({ src, dst, note: noteParts.join('#').trim() });
+  });
+  if (bad.length && !confirm(`Các dòng sau sai định dạng "Nhật = Việt" và sẽ bị bỏ qua: ${bad.join(', ')}. Tiếp tục lưu?`)) return;
+  try {
+    const r = await postJson('/api/glossary', { entries });
+    showToast(`📖 Đã lưu ${r.count} thuật ngữ.`);
+    glossaryModal.classList.remove('active');
+  } catch (e) {
+    alert(`❌ ${e.message}`);
+  }
+});

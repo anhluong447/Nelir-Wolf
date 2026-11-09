@@ -117,6 +117,24 @@
             </div>
           </div>
 
+          <!-- Tools Dropdown -->
+          <div class="dropdown" style="position: relative; display: inline-block;">
+            <button class="btn" id="btnToolsDropdownBtn" title="Công cụ kiểm tra & bảo trì dự án">
+              🛠️ Công cụ ▾
+            </button>
+            <div class="dropdown-menu" id="toolsDropdownMenu">
+              <div class="dropdown-item" onclick="openGlossaryModal()">📖 Bảng thuật ngữ (Glossary)</div>
+              <div class="dropdown-item" onclick="runToolAction('unify')">♻️ Đồng bộ bản dịch của các câu trùng nhau</div>
+              <div class="dropdown-item" onclick="runToolAction('qa')">🔍 Chạy lại kiểm tra chất lượng (QA)</div>
+              <div class="dropdown-item" onclick="runToolAction('validate')">🧪 Kiểm tra logic dự án (khóa / nhãn / DB)</div>
+              <div class="dropdown-divider"></div>
+              <div class="dropdown-item" onclick="runToolAction('gamepath')">📂 Đổi đường dẫn game của dự án</div>
+              <div class="dropdown-item" onclick="runToolAction('reextract')">🔄 Đồng bộ lại chuỗi từ dump gốc</div>
+              <div class="dropdown-item" onclick="runToolAction('reextract_game')">📥 Trích xuất lại từ game (game đã cập nhật)</div>
+              <div class="dropdown-item danger" onclick="runToolAction('restore')">↩️ Khôi phục văn bản gốc tiếng Nhật vào game</div>
+            </div>
+          </div>
+
           <button class="btn btn-success" id="btnPatchGame" title="Vá toàn bộ bản dịch tiếng Việt vào game">
             💾 Patch vào Game
           </button>
@@ -574,7 +592,15 @@
 
         <div class="form-group">
           <label>System Prompt (Chỉ dẫn dịch thuật):</label>
-          <textarea id="inputSystemPrompt" class="form-control" rows="4" style="resize: vertical; font-size: 12px;"></textarea>
+          <textarea id="inputSystemPrompt" class="form-control" rows="4" style="resize: vertical; font-size: 12px;" placeholder="Để trống = dùng prompt mặc định"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>QA: số ký tự tối đa mỗi dòng thoại (0 = tắt):</label>
+          <input type="number" id="inputQaMaxLine" class="form-control" value="56" min="0" max="200">
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+            Dòng Message/Choice dài hơn mức này được gắn cảnh báo "quá dài" (không chặn Patch).
+          </div>
         </div>
       </div>
 
@@ -664,6 +690,26 @@
   </div>
 
   <!-- Toast Notification -->
+  <!-- Glossary Modal -->
+  <div class="modal" id="glossaryModal">
+    <div class="modal-content" style="width: 560px;">
+      <div class="modal-header">
+        <h3 style="font-size: 16px;">📖 Bảng Thuật Ngữ (Glossary) của dự án</h3>
+        <button class="btn" id="closeGlossaryModal" style="border: none; background: transparent; font-size: 16px;">✕</button>
+      </div>
+      <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px; line-height: 1.5;">
+        Mỗi dòng một thuật ngữ theo dạng <code>Tiếng Nhật = Tiếng Việt</code> (có thể thêm <code># ghi chú</code>).
+        Thuật ngữ xuất hiện trong câu đang dịch sẽ được gửi kèm cho AI để dịch thống nhất tên nhân vật, địa danh, kỹ năng...
+      </div>
+      <textarea id="glossaryText" class="form-control" rows="14" style="font-family: monospace; font-size: 12px; resize: vertical;"
+        placeholder="マリーカ = Marika&#10;プシカ = Pushika # nhân vật chính&#10;グール = Ghoul"></textarea>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;">
+        <button class="btn" id="cancelGlossary">Hủy</button>
+        <button class="btn btn-primary" id="saveGlossary">💾 Lưu thuật ngữ</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script src="/static/app.js"></script>
