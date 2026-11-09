@@ -40,6 +40,15 @@ export function listen(event, fn) {
   listeners.get(event).push(fn);
 }
 
+const actions = {};
+/** Register a named action (used by menus, shortcuts and other modules). */
+export function defineAction(name, fn) { actions[name] = fn; }
+export function runAction(name, ...args) {
+  const fn = actions[name];
+  if (!fn) { console.warn('unknown action', name); return Promise.resolve(); }
+  return Promise.resolve().then(() => fn(...args));
+}
+
 export function setUi(patch) {
   Object.assign(state.ui, patch);
   save('nelir.ui', state.ui);
