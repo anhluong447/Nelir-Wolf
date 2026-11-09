@@ -328,7 +328,7 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 .card { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; background: var(--raised); margin-bottom: 14px; }
 
 /* ---------- Toasts ---------- */
-.toasts { position: fixed; right: 16px; bottom: calc(var(--statusbar-h) + 14px); z-index: 120; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
+.toasts { position: fixed; right: 16px; top: calc(var(--topbar-h) + 12px); z-index: 120; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
 .toast {
   pointer-events: auto; display: flex; gap: 10px; align-items: flex-start; max-width: 420px; padding: 10px 12px;
   border-radius: var(--r); background: var(--raised); border: 1px solid var(--border-strong); box-shadow: var(--shadow-2);
@@ -339,7 +339,7 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1
 .toast.error .icon { color: var(--st-qa); }
 .toast.warn .icon { color: var(--st-mtl); }
 .toast.info .icon { color: var(--accent); }
-.toast.leaving { opacity: 0; transform: translateY(4px); transition: all .2s; }
+.toast.leaving { opacity: 0; transform: translateX(8px); transition: all .2s; }
 
 /* ---------- Empty / loading ---------- */
 .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 40px 20px; color: var(--muted); text-align: center; }

@@ -2,6 +2,7 @@
 import { api } from './api.js';
 import { $ } from './dom.js';
 import { initInspector } from './inspector.js';
+import { initJobs } from './jobs.js';
 import { initList, loadRows, loadTypeFilter, move, moveToUnreviewed, renderChips, renderScope } from './list.js';
 import { initSidebar, renderSidebar } from './sidebar.js';
 import { defineAction, emit, listen, runAction, setUi, state } from './state.js';
@@ -70,6 +71,7 @@ async function init() {
   initSidebar();
   initList();
   initInspector();
+  initJobs();
   document.addEventListener('keydown', onKey);
   setUi({});
 
@@ -84,6 +86,7 @@ async function init() {
   listen('scope', onScopeChanged);
   listen('project-changed', async () => { state.file = null; state.rowType = ''; await loadProjectData(); });
   listen('stats-dirty', () => refreshStats().catch(() => {}));
+  listen('settings-changed', () => loadModel());
 
   state.projectFilesHas = (f) => state.files.some((x) => x.file === f);
   await Promise.all([loadModel(), loadProjectData()]);
