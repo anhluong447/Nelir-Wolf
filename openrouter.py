@@ -1,31 +1,45 @@
-import requests
-import json
-import time
-import re
-from typing import List, Dict, Any, Optional
+"""OpenAI-compatible chat client with key rotation + model fallback.
 
-DEFAULT_SYSTEM_PROMPT = (
-    "Bạn là một chuyên gia bản địa hóa game từ tiếng Nhật sang tiếng Việt.\n"
-    "YÊU CẦU BẮT BUỘC:\n"
-    "1. Dịch 100% sang tiếng Việt tự nhiên, phù hợp văn phong hội thoại game. Xác định đúng chủ ngữ theo ngữ cảnh (không tự nhận là 'Tôi' khi mô tả đồ vật/kỹ năng).\n"
-    "2. Giữ nguyên số dòng (ngắt bởi \\n), phân bổ câu chữ cân đối giữa các dòng, không dồn chữ làm một dòng quá dài.\n"
-    "3. Giữ nguyên vẹn mã điều khiển (\\s[...], \\c[...], \\cself[...], @1, dấu ・・・, ngoặc 「」, \"\") ở đúng dòng tương ứng.\n"
-    "4. Chỉ xuất duy nhất bản dịch, tuyệt đối không thêm lời chào, giải thích hay ghi chú."
-)
+Never returns the source text on failure: it raises TranslationAPIError so the
+caller can leave the row untouched instead of saving Japanese as "translated".
+"""
+import json
+import re
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+import requests
+
+import config
+from config import DEFAULT_SYSTEM_PROMPT  # re-exported for backwards compatibility
+
 
 class TranslationAPIError(Exception):
-    def __init__(self, status_code: int, message: str):
+    def __init__(self, status_code: int, message: str, format_only: bool = False):
         self.status_code = status_code
         self.message = message
+        self.format_only = format_only
         super().__init__(f"[{status_code}] {message}")
+
+
+class _AttemptFailed(Exception):
+    def __init__(self, reason: str, auth: bool = False, bad_format: bool = False):
+        self.reason = reason
+        self.auth = auth
+        self.bad_format = bad_format
+        super().__init__(reason)
+
+
+def mask_key(key: str) -> str:
+    return key[:6] + "..." + key[-4:] if len(key) > 10 else "***"
+
 
 def clean_translation(text: str) -> str:
     """Strips explanations, 'Lưu ý:', and artifacts."""
     if not text:
         return ""
-    lines = text.split("\n")
     cleaned = []
-    for line in lines:
+    for line in text.split("\n"):
         l_strip = line.strip().lower()
         if any(l_strip.startswith(prefix) for prefix in [
             "lưu ý:", "lưu ý :", "ghi chú:", "ghi chú :", "chú thích:", "chú thích :",
@@ -35,7 +49,7 @@ def clean_translation(text: str) -> str:
             break
         cleaned.append(line)
 
-    # Auto-repair: if a line is purely control tags (like \s[14] or \c[2]), merge it back to the previous line
+    # A line made only of control tags (\s[14], \c[2]) belongs to the previous line.
     repaired = []
     for line in cleaned:
         if repaired and re.fullmatch(r'(\\[a-zA-Z]+(\[[^\]]*\])?\s*)+', line.strip()):
@@ -44,31 +58,31 @@ def clean_translation(text: str) -> str:
             repaired.append(line)
 
     result = "\n".join(repaired).strip()
-
-    # If starts with 'Bản dịch:' or 'Dịch:'
-    if re.match(r'^(Bản dịch|bản dịch|Dịch|dịch)\s*:\s*', result):
-        result = re.sub(r'^(Bản dịch|bản dịch|Dịch|dịch)\s*:\s*', '', result).strip()
-
-    # If surrounded by unnecessary quotes
+    result = re.sub(r'^(Bản dịch|bản dịch|Dịch|dịch)\s*:\s*', '', result).strip()
     if (result.startswith('"') and result.endswith('"')) or (result.startswith('“') and result.endswith('”')):
         result = result[1:-1].strip()
-
     return result
 
+
 def align_translation_to_raw(raw: str, trans: str) -> str:
-    """Deterministically aligns translated lines and control tags with the original raw text."""
+    """Aligns the number of translated lines with the raw text.
+
+    Missing control codes are NOT re-inserted here (appending them at the end of a
+    line changes their meaning); QA flags them instead (qa.missing_code)."""
     if not trans:
         return ""
     if not raw:
         return trans
 
+    # Models sometimes return an escaped "\\n" instead of a real line break.
+    if "\n" in raw and "\\n" not in raw:
+        trans = re.sub(r"\\n(?!\[)", "\n", trans)
+
     raw_lines = raw.split("\n")
     target_count = len(raw_lines)
-
-    # 1. Split trans
     trans_lines = [l.strip() for l in trans.split("\n")]
 
-    # 2. Filter spurious empty lines if raw didn't have empty lines at those places
+    # Drop spurious empty lines unless raw has an empty line at that spot.
     cleaned = []
     for i, l in enumerate(trans_lines):
         if not l:
@@ -78,394 +92,275 @@ def align_translation_to_raw(raw: str, trans: str) -> str:
         cleaned.append(l)
     trans_lines = cleaned or [trans.strip()]
 
-    # 3. Merge dangling tags and punctuation to previous line
-    tag_or_punct_pattern = r'^(\\[a-zA-Z]+(\[[^\]]*\])?|\<[a-zA-Z0-9_\/]+\>|[・\.…!?,~ー\s]+)+$'
+    # Merge dangling tags / punctuation into the previous line.
+    tag_or_punct = r'^(\\[a-zA-Z]+(\[[^\]]*\])?|\<[a-zA-Z0-9_\/]+\>|[・\.…!?,~ー\s]+)+$'
     merged = []
     for l in trans_lines:
-        if merged and re.match(tag_or_punct_pattern, l):
+        if merged and re.match(tag_or_punct, l):
             merged[-1] = merged[-1].rstrip() + " " + l.strip()
         else:
             merged.append(l)
     trans_lines = merged
 
-    # 4. If more lines than target, intelligently merge lines
+    # Too many lines: merge the cheapest adjacent pair.
     while len(trans_lines) > target_count:
-        best_idx = 0
-        min_score = 999999
+        best_idx, min_score = 0, None
         for i in range(len(trans_lines) - 1):
-            combined_len = len(trans_lines[i]) + len(trans_lines[i+1])
-            priority = 0 if trans_lines[i][-1:] in ',;' else (1 if trans_lines[i][-1:] not in '.!?…' else 2)
-            score = priority * 1000 + combined_len
-            if score < min_score:
-                min_score = score
-                best_idx = i
+            last = trans_lines[i][-1:]
+            priority = 0 if last in ',;' else (1 if last not in '.!?…' else 2)
+            score = priority * 1000 + len(trans_lines[i]) + len(trans_lines[i + 1])
+            if min_score is None or score < min_score:
+                best_idx, min_score = i, score
         trans_lines[best_idx] = trans_lines[best_idx] + " " + trans_lines[best_idx + 1]
         trans_lines.pop(best_idx + 1)
 
-    # 5. If fewer lines than target, intelligently split longest line
+    # Too few lines: split the longest line near its middle.
     while len(trans_lines) < target_count and trans_lines:
         longest_idx = max(range(len(trans_lines)), key=lambda i: len(trans_lines[i]))
-        line_to_split = trans_lines[longest_idx]
-
-        mid = len(line_to_split) // 2
+        line = trans_lines[longest_idx]
+        mid = len(line) // 2
         break_words = r'(?:[,;]\s+|\s+(?:và|nhưng|mà|để|khi|thì|tạo ra|bởi|với|là|được)\s+|\s+)'
-        candidates = [m.start() for m in re.finditer(break_words, line_to_split)]
-        if candidates:
-            split_pos = min(candidates, key=lambda p: abs(p - mid))
-            part1 = line_to_split[:split_pos].strip()
-            part2 = line_to_split[split_pos:].strip()
-            part2 = re.sub(r'^[,\s]+', '', part2)
-            trans_lines = trans_lines[:longest_idx] + [part1, part2] + trans_lines[longest_idx+1:]
-        else:
+        candidates = [m.start() for m in re.finditer(break_words, line)]
+        if not candidates:
             break
-
-    # 6. Tag preservation from raw to matching trans lines
-    for i in range(min(len(raw_lines), len(trans_lines))):
-        raw_tags = re.findall(r'(\\[a-zA-Z]+\[[^\]]*\]|\\[a-zA-Z]+)', raw_lines[i])
-        for tag in raw_tags:
-            if tag not in trans_lines[i]:
-                trans_lines[i] = trans_lines[i].rstrip() + " " + tag
+        split_pos = min(candidates, key=lambda p: abs(p - mid))
+        part1 = line[:split_pos].strip()
+        part2 = re.sub(r'^[,\s]+', '', line[split_pos:].strip())
+        trans_lines = trans_lines[:longest_idx] + [part1, part2] + trans_lines[longest_idx + 1:]
 
     return "\n".join(trans_lines)
 
-def test_connection(base_url: str, api_key: str, model: str) -> Dict[str, Any]:
-    """Tests connection to the LLM backend (Ollama / OpenRouter) and diagnoses model availability."""
-    base_url = (base_url or "https://openrouter.ai/api/v1").rstrip("/")
-    models_url = f"{base_url}/models"
-    headers = {
-        "Authorization": f"Bearer {api_key or 'local'}",
-        "Content-Type": "application/json"
-    }
 
+def _strip_code_fence(content: str) -> str:
+    content = content.strip()
+    if content.startswith("```"):
+        lines = content.split("\n")[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        content = "\n".join(lines).strip()
+    return content
+
+
+def glossary_block(glossary: Optional[List[tuple]], texts: List[str]) -> str:
+    """Glossary entries whose source term appears in the texts."""
+    if not glossary:
+        return ""
+    joined = "\n".join(texts)
+    hits = [(s, d) for s, d in glossary if s and s in joined]
+    if not hits:
+        return ""
+    lines = "\n".join(f"- {s} → {d}" for s, d in hits[:80])
+    return f"\nTHUẬT NGỮ BẮT BUỘC (luôn dịch đúng như sau):\n{lines}\n"
+
+
+def test_connection(base_url: str, api_key: str, model: str, provider: str = "") -> Dict[str, Any]:
+    """Tests connection to the LLM backend and checks the model is listed."""
+    base_url = (base_url or config.OPENROUTER_BASE_URL).rstrip("/")
+    models_url = f"{base_url}/models"
+    headers = {"Authorization": f"Bearer {api_key or 'local'}", "Content-Type": "application/json"}
+    is_kaggle = provider == "kaggle"
     t0 = time.time()
     try:
         r = requests.get(models_url, headers=headers, timeout=12)
         latency = round((time.time() - t0) * 1000)
-
         if r.status_code == 200:
             data = r.json()
             models_list = []
             if isinstance(data, dict):
-                if "data" in data and isinstance(data["data"], list):
+                if isinstance(data.get("data"), list):
                     models_list = [m.get("id", "") for m in data["data"] if isinstance(m, dict)]
-                elif "models" in data and isinstance(data["models"], list):
+                elif isinstance(data.get("models"), list):
                     models_list = [m.get("name", "") for m in data["models"] if isinstance(m, dict)]
-
-            model_normalized = model.replace("models/", "")
-            model_found = any(m.replace("models/", "") == model_normalized for m in models_list) if models_list else True
-            if model_found:
+            norm = model.replace("models/", "")
+            found = any(m.replace("models/", "") == norm for m in models_list) if models_list else True
+            if found:
                 msg = f"✅ Kết nối thành công ({latency}ms)!\nĐã xác nhận model '{model}' sẵn sàng phục vụ."
             else:
-                available_str = ", ".join(models_list[:10]) if models_list else "Không có model nào"
-                msg = (
-                    f"⚠️ Kết nối được tới server ({latency}ms) NHƯNG KHÔNG TÌM THẤY model '{model}'!\n"
-                    f"• Danh sách model hiện có trên server: [{available_str}]\n"
-                    f"👉 Khắc phục: Trên Kaggle hãy chạy: !ollama pull {model}\n"
-                    f"hoặc đổi tên model trong cài đặt thành một trong các model có sẵn ở trên."
-                )
-
-            return {
-                "ok": model_found,
-                "latency_ms": latency,
-                "available_models": models_list,
-                "model_found": model_found,
-                "message": msg
-            }
-        elif r.status_code == 403:
-            return {
-                "ok": False,
-                "status_code": 403,
-                "message": (
-                    "❌ Lỗi 403 Forbidden!\n"
-                    "Ollama trên Kaggle chặn kết nối từ bên ngoài (CORS / Host header check).\n"
-                    "👉 Khắc phục trên Kaggle:\n"
-                    "1. os.environ['OLLAMA_ORIGINS'] = '*'\n"
-                    "2. Thêm cờ '--http-host-header localhost' vào lệnh chạy cloudflared."
-                )
-            }
-        elif r.status_code == 401:
-            return {
-                "ok": False,
-                "status_code": 401,
-                "message": "❌ Lỗi 401 Unauthorized! API Key không hợp lệ hoặc tài khoản bị từ chối."
-            }
-        elif r.status_code == 404:
-            return {
-                "ok": False,
-                "status_code": 404,
-                "message": f"❌ Lỗi 404 Not Found tại URL {models_url}! Hãy kiểm tra lại đường dẫn Base URL."
-            }
-        else:
-            return {
-                "ok": False,
-                "status_code": r.status_code,
-                "message": f"❌ Lỗi HTTP {r.status_code}: {r.text}"
-            }
+                available = ", ".join(models_list[:10]) or "Không có model nào"
+                hint = f"👉 Trên Kaggle hãy chạy: !ollama pull {model}\nhoặc " if is_kaggle else "👉 "
+                msg = (f"⚠️ Kết nối được tới server ({latency}ms) NHƯNG KHÔNG TÌM THẤY model '{model}'!\n"
+                       f"• Model hiện có: [{available}]\n{hint}đổi tên model thành một model có sẵn ở trên.")
+            return {"ok": found, "latency_ms": latency, "available_models": models_list,
+                    "model_found": found, "message": msg}
+        if r.status_code == 403:
+            msg = "❌ Lỗi 403 Forbidden! Key bị từ chối hoặc server chặn truy cập."
+            if is_kaggle:
+                msg += ("\n👉 Trên Kaggle: os.environ['OLLAMA_ORIGINS'] = '*' và thêm cờ "
+                        "'--http-host-header localhost' cho cloudflared.")
+            return {"ok": False, "status_code": 403, "message": msg}
+        if r.status_code == 401:
+            return {"ok": False, "status_code": 401, "message": "❌ Lỗi 401 Unauthorized! API Key không hợp lệ."}
+        if r.status_code == 404:
+            return {"ok": False, "status_code": 404,
+                    "message": f"❌ Lỗi 404 tại {models_url}! Hãy kiểm tra lại Base URL."}
+        return {"ok": False, "status_code": r.status_code, "message": f"❌ Lỗi HTTP {r.status_code}: {r.text[:300]}"}
     except requests.exceptions.ConnectionError:
-        return {
-            "ok": False,
-            "message": (
-                "❌ Lỗi kết nối (Connection Error)!\n"
-                "Không thể kết nối tới URL Cloudflare Tunnel.\n"
-                "👉 Nguyên nhân: Notebook trên Kaggle chưa bật, đã bị tắt/ngắt kết nối, hoặc Cloudflare Tunnel đã đổi sang đường link mới."
-            )
-        }
+        msg = "❌ Không thể kết nối tới server."
+        if is_kaggle:
+            msg += "\n👉 Notebook Kaggle chưa bật/đã tắt, hoặc Cloudflare Tunnel đã đổi link mới."
+        return {"ok": False, "message": msg}
     except requests.exceptions.Timeout:
-        return {
-            "ok": False,
-            "message": "❌ Lỗi Timeout! Server không phản hồi trong 12 giây. Hãy kiểm tra xem GPU/Ollama trên Kaggle có bị treo không."
-        }
+        return {"ok": False, "message": "❌ Timeout! Server không phản hồi trong 12 giây."}
     except Exception as e:
-        return {
-            "ok": False,
-            "message": f"❌ Lỗi không xác định: {str(e)}"
-        }
+        return {"ok": False, "message": f"❌ Lỗi không xác định: {e}"}
+
 
 class OpenRouterTranslator:
-    def __init__(self, api_key: Any, model: Any = "qwen2.5:14b", system_prompt: str = "", base_url: str = "", active_key_index: int = 0):
+    """Works with any OpenAI-compatible endpoint (Gemini, OpenRouter, Ollama...)."""
+
+    def __init__(self, api_key: Any, model: Any = None, system_prompt: str = "", base_url: str = "",
+                 active_key_index: int = 0, glossary: Optional[List[tuple]] = None,
+                 on_key_rotate: Optional[Callable] = None):
         if isinstance(api_key, list):
-            self.api_keys = [k.strip() for k in api_key if isinstance(k, str) and k.strip()]
+            keys = [k.strip() for k in api_key if isinstance(k, str) and k.strip()]
         elif isinstance(api_key, str) and api_key.strip():
-            self.api_keys = [api_key.strip()]
+            keys = [api_key.strip()]
         else:
-            self.api_keys = ["local"]
-
-        if not self.api_keys:
-            self.api_keys = ["local"]
-
-        self.current_key_idx = min(max(0, active_key_index), len(self.api_keys) - 1)
-        self.api_key = self.api_keys[self.current_key_idx]
+            keys = []
+        self.api_keys = keys or ["local"]
+        self.current_key_idx = min(max(0, int(active_key_index or 0)), len(self.api_keys) - 1)
 
         if isinstance(model, list):
-            self.models_priority = [m.strip() for m in model if isinstance(m, str) and m.strip()]
+            models = [m.strip() for m in model if isinstance(m, str) and m.strip()]
         elif isinstance(model, str) and model.strip():
-            self.models_priority = [model.strip()]
+            models = [model.strip()]
         else:
-            self.models_priority = ["gemini-3.5-flash-lite"]
-        if not self.models_priority:
-            self.models_priority = ["gemini-3.5-flash-lite"]
+            models = []
+        self.models_priority = models or [config.GEMINI_DEFAULT_MODELS[0]]
 
-        self.model = self.models_priority[0]
-        self.base_url = (base_url or "https://openrouter.ai/api/v1").rstrip("/")
+        self.base_url = (base_url or config.OPENROUTER_BASE_URL).rstrip("/")
         self.api_url = f"{self.base_url}/chat/completions"
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.glossary = glossary or []
+        self.on_key_rotate = on_key_rotate
 
+    @property
+    def api_key(self) -> str:
+        return self.api_keys[self.current_key_idx]
+
+    # ------------------------------------------------------------------
+    def _post(self, key: str, model: str, messages: list) -> str:
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "X-Title": "Nelir Wolf Translator",
+        }
+        data = {"model": model, "messages": messages, "temperature": 0.1}
+        reason = ""
+        for attempt in range(2):
+            try:
+                r = requests.post(self.api_url, headers=headers, json=data, timeout=config.REQUEST_TIMEOUT)
+            except requests.exceptions.Timeout:
+                reason = f"Timeout quá {config.REQUEST_TIMEOUT}s"
+            except requests.exceptions.ConnectionError:
+                reason = "Mất kết nối mạng"
+            except requests.exceptions.RequestException as e:
+                reason = f"Lỗi request: {str(e)[:80]}"
+            else:
+                if r.status_code == 200:
+                    try:
+                        return r.json()['choices'][0]['message']['content'] or ""
+                    except Exception:
+                        raise _AttemptFailed("Phản hồi API không đúng định dạng", bad_format=True)
+                if r.status_code in (401, 403):
+                    raise _AttemptFailed(f"Key không hợp lệ hoặc bị từ chối ({r.status_code})", auth=True)
+                if r.status_code == 404:
+                    raise _AttemptFailed(f"Model '{model}' không tồn tại hoặc không hỗ trợ (404)")
+                if r.status_code == 429:
+                    raise _AttemptFailed("Rate Limit / Hết Quota (429)")
+                reason = f"Lỗi máy chủ ({r.status_code})"
+                if r.status_code not in (500, 502, 503, 504):
+                    raise _AttemptFailed(f"HTTP {r.status_code}")
+            if attempt == 0:
+                time.sleep(1)
+        raise _AttemptFailed(reason)
+
+    def _run(self, messages: list, parse: Callable[[str], Any], on_fallback=None, on_key_rotate=None):
+        """Try NV1..NVn on the current key, then rotate keys circularly."""
+        on_key_rotate = on_key_rotate or self.on_key_rotate
+        n_keys = len(self.api_keys)
+        last_reason = ""
+        format_only = True
+        for k_try in range(n_keys):
+            if k_try > 0:
+                old = self.current_key_idx
+                self.current_key_idx = (old + 1) % n_keys
+                if on_key_rotate:
+                    on_key_rotate(old + 1, self.current_key_idx + 1, mask_key(self.api_keys[old]),
+                                  mask_key(self.api_key), last_reason)
+            key = self.api_key
+            for p_idx, model in enumerate(self.models_priority):
+                try:
+                    content = self._post(key, model, messages)
+                    return parse(content)
+                except _AttemptFailed as f:
+                    last_reason = f.reason
+                    format_only = format_only and f.bad_format
+                    if f.auth:
+                        break
+                    if p_idx < len(self.models_priority) - 1 and on_fallback:
+                        on_fallback(model, self.models_priority[p_idx + 1], p_idx + 2, f.reason)
+        raise TranslationAPIError(
+            429 if not format_only else 502,
+            f"Tất cả {n_keys} API Key và {len(self.models_priority)} Model đều thất bại ({last_reason})",
+            format_only=format_only)
+
+    # ------------------------------------------------------------------
     def translate_batch(self, texts: List[str], on_fallback=None, on_key_rotate=None) -> List[str]:
-        """Translates a batch of texts in one API call with two-tiered rotation:
-        Level 1: Rotate priority models on error/limit.
-        Level 2: Rotate API keys when all models in the current key hit daily limit / fail."""
+        """Translate many lines in one call. Raises TranslationAPIError on failure."""
         if not texts:
             return []
+        if len(texts) == 1:
+            return [self.translate_single(texts[0], on_key_rotate=on_key_rotate)]
 
-        payload_items = [{"id": i, "text": t} for i, t in enumerate(texts)]
-
-        system_instruction = (
+        payload = [{"id": i, "text": t} for i, t in enumerate(texts)]
+        system = (
             f"{self.system_prompt}\n"
-            "Dưới đây là danh sách các câu thoại dạng JSON: [{\"id\": 0, \"text\": \"...\"}, ...].\n"
-            "Hãy trả về JSON array các chuỗi tiếng Việt tương ứng theo đúng id: [\"bản dịch 0\", \"bản dịch 1\", ...].\n"
+            f"{glossary_block(self.glossary, texts)}"
+            "Các câu dưới đây là các dòng liên tiếp trong cùng một cảnh game, hãy dùng chúng làm ngữ cảnh cho nhau.\n"
+            "Đầu vào là JSON: [{\"id\": 0, \"text\": \"...\"}, ...].\n"
+            "Trả về JSON array các chuỗi tiếng Việt theo đúng thứ tự id: [\"bản dịch 0\", \"bản dịch 1\", ...].\n"
             "Mỗi chuỗi giữ đúng số dòng (\\n) của câu gốc. Chỉ trả về JSON thuần túy, không dùng markdown."
         )
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 
-        TIMEOUT_SECONDS = 30
-        last_error = None
-        last_rotate_reason = ""
-        num_keys = len(self.api_keys)
-        keys_tried = 0
+        def parse(content: str):
+            content = _strip_code_fence(content)
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                raise _AttemptFailed("Model trả về JSON không hợp lệ", bad_format=True)
+            if isinstance(parsed, dict) and isinstance(parsed.get("translations"), list):
+                parsed = parsed["translations"]
+            if not isinstance(parsed, list) or len(parsed) != len(texts):
+                raise _AttemptFailed("Model trả về sai số lượng câu", bad_format=True)
+            out = []
+            for raw, x in zip(texts, parsed):
+                if isinstance(x, dict):
+                    x = x.get("text") or x.get("translation") or ""
+                out.append(align_translation_to_raw(raw, clean_translation(str(x))))
+            return out
 
-        # Level 2: Loop through API keys (circular rotation through all keys)
-        while keys_tried < num_keys:
-            active_key = self.api_keys[self.current_key_idx]
-            self.api_key = active_key
+        try:
+            return self._run(messages, parse, on_fallback, on_key_rotate)
+        except TranslationAPIError as err:
+            if not err.format_only:
+                raise
+        # API works but no model returns valid batch JSON -> go line by line.
+        return [self.translate_single(t, on_key_rotate=on_key_rotate) for t in texts]
 
-            headers = {
-                "Authorization": f"Bearer {active_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/anhluong447/Nelir",
-                "X-Title": "Nelir Wolf Translator"
-            }
+    def translate_single(self, text: str, on_key_rotate=None) -> str:
+        """Translate one text. Raises TranslationAPIError on failure (never returns the source)."""
+        messages = [
+            {"role": "system", "content": self.system_prompt + glossary_block(self.glossary, [text])},
+            {"role": "user", "content": f"Dịch đoạn game sau sang tiếng Việt (giữ nguyên số dòng \\n và mã điều khiển):\n{text}"},
+        ]
 
-            key_exhausted = False
-            key_auth_error = False
+        def parse(content: str):
+            result = align_translation_to_raw(text, clean_translation(content.strip()))
+            if not result.strip():
+                raise _AttemptFailed("Model trả về bản dịch rỗng", bad_format=True)
+            return result
 
-            # Level 1: Loop through priority models: NV1 is ALWAYS tried first on every batch
-            for p_idx, current_model in enumerate(self.models_priority):
-                data = {
-                    "model": current_model,
-                    "messages": [
-                        {"role": "system", "content": system_instruction},
-                        {"role": "user", "content": json.dumps(payload_items, ensure_ascii=False)}
-                    ],
-                    "temperature": 0.1
-                }
-
-                max_retries = 2
-                should_rotate = False
-                rotate_reason = ""
-
-                for attempt in range(max_retries):
-                    try:
-                        response = requests.post(self.api_url, headers=headers, json=data, timeout=TIMEOUT_SECONDS)
-
-                        # Auth error with this specific key -> Skip this key entirely right away!
-                        if response.status_code in (401, 403):
-                            should_rotate = True
-                            key_auth_error = True
-                            rotate_reason = f"Key không hợp lệ hoặc bị từ chối ({response.status_code})"
-                            break
-
-                        # Model not available on this endpoint
-                        if response.status_code == 404:
-                            should_rotate = True
-                            rotate_reason = f"Model '{current_model}' không tồn tại hoặc không hỗ trợ (404)"
-                            break
-
-                        if response.status_code == 200:
-                            res_json = response.json()
-                            content = res_json['choices'][0]['message']['content'].strip()
-                            if content.startswith("```"):
-                                lines = content.split("\n")
-                                if lines[0].startswith("```"):
-                                    lines = lines[1:]
-                                if lines and lines[-1].startswith("```"):
-                                    lines = lines[:-1]
-                                content = "\n".join(lines).strip()
-
-                            try:
-                                parsed = json.loads(content)
-                                if isinstance(parsed, list) and len(parsed) == len(texts):
-                                    return [align_translation_to_raw(raw, clean_translation(str(x))) for raw, x in zip(texts, parsed)]
-                                elif isinstance(parsed, dict) and "translations" in parsed:
-                                    return [align_translation_to_raw(raw, clean_translation(str(x))) for raw, x in zip(texts, parsed["translations"])]
-                            except Exception:
-                                pass
-
-                            raw_lines = [clean_translation(l.strip()) for l in content.split("\n") if l.strip()]
-                            if len(raw_lines) == len(texts):
-                                return [align_translation_to_raw(raw, line) for raw, line in zip(texts, raw_lines)]
-
-                            return [self.translate_single(t) for t in texts]
-
-                        elif response.status_code == 429:
-                            should_rotate = True
-                            rotate_reason = "Rate Limit / Hết Quota (429)"
-                            break
-
-                        elif response.status_code in (500, 502, 503, 504):
-                            if attempt == max_retries - 1:
-                                should_rotate = True
-                                rotate_reason = f"Lỗi máy chủ Google ({response.status_code})"
-                                break
-                            time.sleep(1)
-
-                        else:
-                            should_rotate = True
-                            rotate_reason = f"HTTP {response.status_code}"
-                            break
-
-                    except requests.exceptions.Timeout:
-                        last_error = f"Timeout quá {TIMEOUT_SECONDS}s"
-                        if attempt == max_retries - 1:
-                            should_rotate = True
-                            rotate_reason = f"Timeout quá {TIMEOUT_SECONDS}s"
-                            break
-                        time.sleep(1)
-                    except requests.exceptions.ConnectionError:
-                        last_error = "Mất kết nối mạng"
-                        if attempt == max_retries - 1:
-                            should_rotate = True
-                            rotate_reason = "Mất kết nối mạng"
-                            break
-                        time.sleep(1)
-                    except Exception as e:
-                        last_error = str(e)
-                        if attempt == max_retries - 1:
-                            should_rotate = True
-                            rotate_reason = f"Lỗi: {str(e)[:50]}"
-                            break
-                        time.sleep(1)
-
-                if should_rotate:
-                    last_rotate_reason = rotate_reason
-                    # If this key has an auth failure, do not waste time trying other models with the same broken key
-                    if key_auth_error:
-                        key_exhausted = True
-                        break
-
-                    if p_idx < len(self.models_priority) - 1:
-                        next_model = self.models_priority[p_idx + 1]
-                        if on_fallback:
-                            on_fallback(current_model, next_model, p_idx + 2, rotate_reason)
-                        continue # Try next model under current key
-                    else:
-                        # All models under current key failed / hit limits!
-                        key_exhausted = True
-                        break
-
-            # If all models in this key failed, rotate to the next key circularly!
-            if key_exhausted:
-                keys_tried += 1
-                if keys_tried < num_keys:
-                    old_idx = self.current_key_idx
-                    self.current_key_idx = (self.current_key_idx + 1) % num_keys
-                    next_key = self.api_keys[self.current_key_idx]
-                    self.api_key = next_key
-                    k_old = active_key[:6] + "..." + active_key[-4:] if len(active_key) > 10 else "***"
-                    k_new = next_key[:6] + "..." + next_key[-4:] if len(next_key) > 10 else "***"
-                    if on_key_rotate:
-                        on_key_rotate(old_idx + 1, self.current_key_idx + 1, k_old, k_new, last_rotate_reason)
-                    continue # Start fresh at NV1 with the new key!
-                else:
-                    break # All keys exhausted
-
-        raise TranslationAPIError(429, f"Tất cả {num_keys} API Key và {len(self.models_priority)} Model đều đã hết Quota hoặc gặp sự cố ({last_rotate_reason or last_error})!")
-
-    def translate_single(self, text: str) -> str:
-        """Translates a single line of text with circular key & model rotation fallback."""
-        num_keys = len(self.api_keys)
-        keys_tried = 0
-        while keys_tried < num_keys:
-            active_key = self.api_keys[self.current_key_idx]
-            self.api_key = active_key
-            headers = {
-                "Authorization": f"Bearer {active_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/anhluong447/Nelir",
-                "X-Title": "Nelir Wolf Translator"
-            }
-            key_failed = False
-            for p_idx, current_model in enumerate(self.models_priority):
-                data = {
-                    "model": current_model,
-                    "messages": [
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": f"Dịch đoạn game sau sang tiếng Việt (giữ nguyên số dòng \\n và mã điều khiển):\n{text}"}
-                    ],
-                    "temperature": 0.1
-                }
-                try:
-                    r = requests.post(self.api_url, headers=headers, json=data, timeout=30)
-                    if r.status_code == 200:
-                        raw_res = r.json()['choices'][0]['message']['content'].strip()
-                        cleaned = clean_translation(raw_res)
-                        return align_translation_to_raw(text, cleaned)
-                    elif r.status_code in (401, 403):
-                        key_failed = True
-                        break
-                    elif p_idx < len(self.models_priority) - 1:
-                        continue
-                    else:
-                        key_failed = True
-                except Exception as e:
-                    if p_idx < len(self.models_priority) - 1:
-                        continue
-                    key_failed = True
-
-            if key_failed:
-                keys_tried += 1
-                if keys_tried < num_keys:
-                    self.current_key_idx = (self.current_key_idx + 1) % num_keys
-                    continue
-                else:
-                    break
-
-        return text
+        return self._run(messages, parse, on_key_rotate=on_key_rotate)

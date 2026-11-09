@@ -9,15 +9,24 @@ global_settings.db
 *.db-journal
 *.sqlite3
 
-# Large dump folders & save files
+# Large / generated project data & save files
 dump/
 projects/*/dump/
+projects/*/dump.tmp/
+projects/*/dump_original/
+projects/*/dump_original.tmp/
+projects/*/game_backup/
+projects/*/game_backup.tmp/
+projects/*/nelir_dump_*/
 *.nel
 
-# Scratch & temporary test files
+# Local backups / archives
+_backup*/
+_archive/
+
+# Scratch & temporary files (tests/ is tracked)
 scratch_*.py
 inspect_*.py
-test_*.py
 temp_*/
 
 # OS generated files

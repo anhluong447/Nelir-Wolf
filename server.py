@@ -1,149 +1,192 @@
-import os
+"""FastAPI backend for Nelir Wolf Translator."""
 import json
-import requests
-import time
-import sqlite3
-import uvicorn
+import os
 import tempfile
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, UploadFile, File, Form
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+import time
 from typing import List, Optional
 
-from bridge import WolfBridge
+import requests
+import uvicorn
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+import config
+import pipeline
+from bridge import NoActiveProject, WolfBridge
+from config import STATUS_EMPTY, STATUS_MTL, STATUS_QA, STATUS_REVIEWED
+from db import connect, status_counts
+from extractor import WolfTLError
 from openrouter import OpenRouterTranslator, TranslationAPIError, test_connection
+from qa import FLAG_LABELS, qa_flags
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-bridge = WolfBridge(ROOT_DIR)
-
+bridge = WolfBridge(config.ROOT_DIR)
 app = FastAPI(title="Nelir Wolf Translator")
+os.makedirs(config.STATIC_DIR, exist_ok=True)
+app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
 
-# Serve static files
-static_dir = os.path.join(ROOT_DIR, "static")
-os.makedirs(static_dir, exist_ok=True)
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+@app.exception_handler(NoActiveProject)
+def _no_project(_req: Request, exc: NoActiveProject):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(WolfTLError)
+def _wolftl_error(_req: Request, exc: WolfTLError):
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
 
 @app.on_event("startup")
 def startup_event():
-    bridge.extract_strings_to_db(force=False)
+    if bridge.ctx:
+        bridge.prepare_active_project()
+
 
 @app.get("/")
 def get_index():
-    return FileResponse(os.path.join(static_dir, "index.html"))
+    return FileResponse(os.path.join(config.STATIC_DIR, "index.html"))
+
+
+def _check_project_id(project_id: str):
+    if not config.is_valid_project_id(project_id):
+        raise HTTPException(status_code=400, detail=f"ID dự án không hợp lệ: '{project_id}'")
+
+
+def _switch_project(project_id: str):
+    bridge.load_active_project(project_id)
+    return bridge.prepare_active_project()
+
 
 # ==========================================
-# PROJECT MANAGEMENT & .NEL APIS
+# PROJECTS & .NEL
 # ==========================================
 class ProjectSelectRequest(BaseModel):
     project_id: str
+
 
 class ProjectCreateRequest(BaseModel):
     name: str
     game_path: str
 
+
+class GamePathRequest(BaseModel):
+    game_path: str
+
+
+class ReextractRequest(BaseModel):
+    from_game: bool = False
+
+
 @app.get("/api/projects")
 def get_projects():
     projects = bridge.pm.list_projects()
-    active_proj = bridge.pm.get_active_project()
-    return {
-        "active_project_id": bridge.project_id,
-        "active_project": active_proj,
-        "projects": projects
-    }
+    active = next((p for p in projects if p["is_active"]), None)
+    return {"active_project_id": bridge.project_id, "active_project": active, "projects": projects}
+
 
 @app.post("/api/projects/select")
 def select_project(req: ProjectSelectRequest):
-    bridge.load_active_project(req.project_id)
-    return {
-        "success": True,
-        "active_project": bridge.pm.get_active_project()
-    }
+    _check_project_id(req.project_id)
+    try:
+        report = _switch_project(req.project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "active_project": bridge.pm.get_project(req.project_id), "report": report}
+
 
 @app.post("/api/projects/create")
 def create_project(req: ProjectCreateRequest):
     try:
-        new_proj = bridge.pm.create_project(req.name, req.game_path, extract_now=True)
-        bridge.load_active_project(new_proj["id"])
-        bridge.extract_strings_to_db(force=False)
-        return {"success": True, "project": new_proj}
-    except Exception as e:
+        new_proj = bridge.pm.create_project(req.name, req.game_path)
+    except (ValueError, WolfTLError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    report = _switch_project(new_proj["id"])
+    return {"success": True, "project": bridge.pm.get_project(new_proj["id"]), "report": report}
+
+
+@app.post("/api/projects/game-path")
+def update_game_path(req: GamePathRequest):
+    ctx = bridge.require()
+    try:
+        proj = bridge.pm.update_game_path(ctx.project_id, req.game_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    bridge.load_active_project(ctx.project_id)
+    return {"success": True, "project": proj}
+
+
+@app.post("/api/projects/reextract")
+def reextract(req: ReextractRequest):
+    try:
+        stats = bridge.reextract(from_game=req.from_game)
+    except WolfTLError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "stats": stats}
+
 
 @app.get("/api/projects/export-nel")
 def export_nel(project_id: Optional[str] = Query(None)):
-    target_id = project_id or bridge.project_id
+    target_id = project_id or bridge.require().project_id
+    _check_project_id(target_id)
     try:
         nel_path = bridge.pm.export_nel(target_id)
-        filename = os.path.basename(nel_path)
-        return FileResponse(
-            nel_path,
-            media_type="application/octet-stream",
-            filename=filename,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    filename = os.path.basename(nel_path)
+    return FileResponse(nel_path, media_type="application/octet-stream", filename=filename)
+
 
 @app.post("/api/projects/import-nel")
 async def import_nel(file: UploadFile = File(...), override_game_path: Optional[str] = Form(None)):
+    fd, tmp_path = tempfile.mkstemp(suffix=".nel")
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".nel") as tmp:
-            tmp_path = tmp.name
-            content = await file.read()
-            tmp.write(content)
-
-        imported_proj = bridge.pm.import_nel(tmp_path, override_game_path)
-        bridge.load_active_project(imported_proj["id"])
-        bridge.extract_strings_to_db(force=False)
-        
+        with os.fdopen(fd, "wb") as tmp:
+            tmp.write(await file.read())
+        try:
+            imported = bridge.pm.import_nel(tmp_path, override_game_path)
+        except (ValueError, WolfTLError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    finally:
         try:
             os.remove(tmp_path)
-        except Exception:
+        except OSError:
             pass
+    report = _switch_project(imported["id"])
+    return {"success": True, "project": imported, "warning": imported.get("warning", ""), "report": report}
 
-        return {"success": True, "project": imported_proj}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 @app.delete("/api/projects/{project_id}")
 def delete_project(project_id: str):
+    _check_project_id(project_id)
     try:
         bridge.pm.delete_project(project_id)
-        return {"success": True}
-    except Exception as e:
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True}
 
+
+# ==========================================
+# ROWS
+# ==========================================
 @app.get("/api/stats")
 def get_stats():
-    with sqlite3.connect(bridge.db_path) as conn:
-        total = conn.execute("SELECT COUNT(*) FROM translation_rows").fetchone()[0]
-        empty = conn.execute("SELECT COUNT(*) FROM translation_rows WHERE status = 0").fetchone()[0]
-        mtl = conn.execute("SELECT COUNT(*) FROM translation_rows WHERE status = 1").fetchone()[0]
-        translated = conn.execute("SELECT COUNT(*) FROM translation_rows WHERE status = 2").fetchone()[0]
-    return {
-        "total": total,
-        "empty": empty,
-        "mtl": mtl,
-        "translated": translated,
-        "completed": mtl + translated
-    }
+    with connect(bridge.db_path) as conn:
+        return status_counts(conn)
+
 
 @app.get("/api/files")
 def get_files():
-    with sqlite3.connect(bridge.db_path) as conn:
-        cursor = conn.execute("""
-            SELECT file, category, COUNT(*) as total,
-                   SUM(CASE WHEN status > 0 THEN 1 ELSE 0 END) as translated_count
-            FROM translation_rows
-            GROUP BY file
-            ORDER BY category, file
-        """)
-        results = [
-            {"file": r[0], "category": r[1], "total": r[2], "translated": r[3] or 0}
-            for r in cursor.fetchall()
-        ]
-    return results
+    with connect(bridge.db_path) as conn:
+        rows = conn.execute("""
+            SELECT file, category, COUNT(*),
+                   SUM(CASE WHEN status IN (1, 2) AND locked = 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN locked = 0 THEN 1 ELSE 0 END)
+            FROM translation_rows GROUP BY file ORDER BY category, file
+        """).fetchall()
+    return [{"file": r[0], "category": r[1], "total": r[2], "translated": r[3] or 0, "translatable": r[4] or 0}
+            for r in rows]
+
 
 class QueryParams(BaseModel):
     page: int = 1
@@ -153,573 +196,494 @@ class QueryParams(BaseModel):
     status: int = -1
     search: Optional[str] = None
 
+
+# status filter value -> SQL condition
+STATUS_FILTERS = {
+    0: "status = 0 AND locked = 0",
+    1: "status = 1 AND locked = 0",
+    2: "status = 2 AND locked = 0",
+    3: "status = 3 AND locked = 0",
+    4: "status IN (0, 1, 3) AND locked = 0",   # chưa duyệt
+    5: "locked = 1",
+}
+
+
+def _row_dict(r):
+    return {"id": r[0], "file": r[1], "category": r[2], "path": r[3], "row_type": r[4], "raw": r[5],
+            "mtl": r[6], "translated": r[7], "status": r[8], "locked": bool(r[9]),
+            "qa_flags": [f for f in (r[10] or "").split(",") if f]}
+
+
+ROW_COLUMNS = "id, file, category, path, row_type, raw, mtl, translated, status, locked, qa_flags"
+
+
 @app.post("/api/rows")
 def get_rows(q: QueryParams):
-    conditions = []
-    params = []
-
+    conditions, params = [], []
     if q.file:
         conditions.append("file = ?")
         params.append(q.file)
     if q.category:
         conditions.append("category = ?")
         params.append(q.category)
-    if q.status == 0:
-        conditions.append("status = 0")
-    elif q.status == 1:
-        conditions.append("status = 1")
-    elif q.status == 2:
-        conditions.append("status = 2")
-    elif q.status == 3:
-        conditions.append("status IN (0, 1)")
-
+    if q.status in STATUS_FILTERS:
+        conditions.append(STATUS_FILTERS[q.status])
     if q.search:
         s = f"%{q.search}%"
         conditions.append("(raw LIKE ? OR mtl LIKE ? OR translated LIKE ?)")
         params.extend([s, s, s])
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    page_size = min(max(1, q.page_size), 500)
+    with connect(bridge.db_path) as conn:
+        total = conn.execute(f"SELECT COUNT(*) FROM translation_rows {where}", params).fetchone()[0]
+        rows = conn.execute(f"SELECT {ROW_COLUMNS} FROM translation_rows {where} ORDER BY id LIMIT ? OFFSET ?",
+                            params + [page_size, (max(1, q.page) - 1) * page_size]).fetchall()
+    return {"page": q.page, "page_size": page_size, "total": total, "rows": [_row_dict(r) for r in rows],
+            "flag_labels": FLAG_LABELS}
 
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-    with sqlite3.connect(bridge.db_path) as conn:
-        count_sql = f"SELECT COUNT(*) FROM translation_rows {where_clause}"
-        total_rows = conn.execute(count_sql, params).fetchone()[0]
-
-        offset = (q.page - 1) * q.page_size
-        sql = f"""
-            SELECT id, file, category, path, row_type, raw, mtl, translated, status
-            FROM translation_rows
-            {where_clause}
-            ORDER BY id
-            LIMIT ? OFFSET ?
-        """
-        cursor = conn.execute(sql, params + [q.page_size, offset])
-        rows = [
-            {
-                "id": r[0],
-                "file": r[1],
-                "category": r[2],
-                "path": r[3],
-                "row_type": r[4],
-                "raw": r[5],
-                "mtl": r[6],
-                "translated": r[7],
-                "status": r[8]
-            }
-            for r in cursor.fetchall()
-        ]
-
-    return {
-        "page": q.page,
-        "page_size": q.page_size,
-        "total": total_rows,
-        "rows": rows
-    }
 
 class RowUpdate(BaseModel):
     id: int
     translated: Optional[str] = None
-    mtl: Optional[str] = None
+
 
 @app.post("/api/rows/update")
 def update_row(u: RowUpdate):
-    with sqlite3.connect(bridge.db_path) as conn:
-        if u.translated is not None:
-            status = 2 if u.translated.strip() else (1 if u.mtl else 0)
-            conn.execute(
-                "UPDATE translation_rows SET translated = ?, status = ? WHERE id = ?",
-                (u.translated, status, u.id)
-            )
-        elif u.mtl is not None:
-            conn.execute(
-                "UPDATE translation_rows SET mtl = ?, status = CASE WHEN translated != '' THEN 2 ELSE 1 END WHERE id = ?",
-                (u.mtl, u.id)
-            )
-        conn.commit()
-    return {"success": True}
+    """Manual edit: non-empty text => reviewed (2); QA flags are kept as warnings."""
+    if u.translated is None:
+        raise HTTPException(status_code=400, detail="Thiếu nội dung bản dịch")
+    with connect(bridge.db_path) as conn:
+        row = conn.execute("SELECT raw, mtl, locked, row_type FROM translation_rows WHERE id = ?",
+                           (u.id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Không tìm thấy dòng")
+        raw, mtl, locked, rt = row
+        if locked:
+            raise HTTPException(status_code=400, detail="Dòng này bị khóa (là khóa logic của game), không được dịch.")
+        text = u.translated
+        if text.strip():
+            status, flags = STATUS_REVIEWED, ",".join(qa_flags(raw, text, rt, bridge.max_line_chars()))
+        elif mtl.strip():
+            status, flags = pipeline.machine_status(raw, mtl, rt, bridge.max_line_chars())
+        else:
+            status, flags = STATUS_EMPTY, ""
+        conn.execute("UPDATE translation_rows SET translated = ?, status = ?, qa_flags = ? WHERE id = ?",
+                     (text, status, flags, u.id))
+        r = conn.execute(f"SELECT {ROW_COLUMNS} FROM translation_rows WHERE id = ?", (u.id,)).fetchone()
+    return {"success": True, "row": _row_dict(r)}
+
+
+class ConfirmRequest(BaseModel):
+    ids: List[int]
+
+
+@app.post("/api/rows/confirm")
+def confirm_rows(req: ConfirmRequest):
+    """Mark machine rows as reviewed, copying the MTL into the translation if needed."""
+    if not req.ids:
+        return {"success": True, "affected": 0}
+    ph = ",".join("?" * len(req.ids))
+    with connect(bridge.db_path) as conn:
+        affected = conn.execute(f"""
+            UPDATE translation_rows
+            SET translated = CASE WHEN translated = '' THEN mtl ELSE translated END, status = 2
+            WHERE id IN ({ph}) AND locked = 0 AND (translated != '' OR mtl != '')
+        """, req.ids).rowcount
+    return {"success": True, "affected": affected}
+
 
 class ClearRequest(BaseModel):
-    target: str # "row", "file", "range", "type", "all"
+    target: str  # "row", "file", "range", "type", "all"
     row_id: Optional[int] = None
     file: Optional[str] = None
     start_id: Optional[int] = None
     end_id: Optional[int] = None
     row_types: Optional[List[str]] = None
-    clear_type: str # "mtl_only", "trans_only", "both"
+    clear_type: str  # "mtl_only", "trans_only", "both"
+
+
+CLEAR_SQL = {
+    "mtl_only": "mtl = '', status = CASE WHEN translated = '' THEN 0 ELSE status END",
+    "trans_only": "translated = '', status = CASE WHEN mtl = '' THEN 0 WHEN status = 2 THEN 1 ELSE status END",
+    "both": "mtl = '', translated = '', status = 0",
+}
+
 
 @app.post("/api/rows/clear")
 def clear_rows(req: ClearRequest):
-    with sqlite3.connect(bridge.db_path) as conn:
-        conditions = []
-        params = []
-
-        if req.target == "row" and req.row_id:
-            conditions.append("id = ?")
-            params.append(req.row_id)
-        elif req.target == "file" and req.file:
+    conditions, params = [], []
+    if req.target == "row" and req.row_id is not None:
+        conditions.append("id = ?")
+        params.append(req.row_id)
+    elif req.target == "file" and req.file:
+        conditions.append("file = ?")
+        params.append(req.file)
+    elif req.target in ("range", "type", "all"):
+        if req.target != "all" and req.file and req.file != "ALL":
             conditions.append("file = ?")
             params.append(req.file)
-        elif req.target == "range":
-            if req.file and req.file != "ALL":
-                conditions.append("file = ?")
-                params.append(req.file)
+        if req.target == "range":
+            if req.start_id is None and req.end_id is None:
+                raise HTTPException(status_code=400, detail="Cần ít nhất một mốc ID")
             if req.start_id is not None:
                 conditions.append("id >= ?")
                 params.append(req.start_id)
             if req.end_id is not None:
                 conditions.append("id <= ?")
                 params.append(req.end_id)
-        elif req.target == "type":
-            if req.file and req.file != "ALL":
-                conditions.append("file = ?")
-                params.append(req.file)
-            if req.row_types and len(req.row_types) > 0:
-                conditions.append(f"row_type IN ({','.join(['?']*len(req.row_types))})")
-                params.extend(req.row_types)
-        elif req.target == "all":
-            if req.row_types and len(req.row_types) > 0:
-                conditions.append(f"row_type IN ({','.join(['?']*len(req.row_types))})")
-                params.extend(req.row_types)
-        else:
-            raise HTTPException(status_code=400, detail="Target không hợp lệ")
+    else:
+        raise HTTPException(status_code=400, detail="Target không hợp lệ")
+    if req.row_types:
+        conditions.append(f"row_type IN ({','.join('?' * len(req.row_types))})")
+        params.extend(req.row_types)
+    if req.clear_type not in CLEAR_SQL:
+        raise HTTPException(status_code=400, detail="Loại xóa không hợp lệ")
 
-        if req.row_types and len(req.row_types) > 0 and req.target not in ("type", "all"):
-            conditions.append(f"row_type IN ({','.join(['?']*len(req.row_types))})")
-            params.extend(req.row_types)
-
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-        if req.clear_type == "mtl_only":
-            sql = f"""
-                UPDATE translation_rows
-                SET mtl = '',
-                    status = CASE WHEN translated != '' THEN 2 ELSE 0 END
-                {where}
-            """
-        elif req.clear_type == "trans_only":
-            sql = f"""
-                UPDATE translation_rows
-                SET translated = '',
-                    status = CASE WHEN mtl != '' THEN 1 ELSE 0 END
-                {where}
-            """
-        elif req.clear_type == "both":
-            sql = f"""
-                UPDATE translation_rows
-                SET mtl = '',
-                    translated = '',
-                    status = 0
-                {where}
-            """
-        else:
-            raise HTTPException(status_code=400, detail="Loại xóa không hợp lệ")
-
-        cursor = conn.execute(sql, params)
-        affected = cursor.rowcount
-        conn.commit()
-
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    with connect(bridge.db_path) as conn:
+        affected = conn.execute(f"UPDATE translation_rows SET {CLEAR_SQL[req.clear_type]} {where}", params).rowcount
+        conn.execute("UPDATE translation_rows SET qa_flags = '' WHERE status = 0")
     return {"success": True, "affected": affected}
+
 
 @app.get("/api/types/stats")
 def get_types_stats(file: Optional[str] = Query(None)):
-    with sqlite3.connect(bridge.db_path) as conn:
-        conditions = []
-        params = []
-        if file and file != "ALL":
-            conditions.append("file = ?")
-            params.append(file)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"""
-            SELECT row_type, 
-                   COUNT(*) as total,
-                   SUM(CASE WHEN status > 0 THEN 1 ELSE 0 END) as translated,
-                   SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) as empty
-            FROM translation_rows
-            {where}
-            GROUP BY row_type
-            ORDER BY total DESC
-        """
-        rows = conn.execute(sql, params).fetchall()
-        return [
-            {
-                "row_type": r[0] or "Unknown",
-                "total": r[1],
-                "translated": r[2] or 0,
-                "empty": r[3] or 0
-            }
-            for r in rows
-        ]
+    where, params = "", []
+    if file and file != "ALL":
+        where, params = "WHERE file = ?", [file]
+    with connect(bridge.db_path) as conn:
+        rows = conn.execute(f"""
+            SELECT row_type, COUNT(*),
+                   SUM(CASE WHEN status > 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status IN (0, 3) AND locked = 0 THEN 1 ELSE 0 END),
+                   SUM(locked)
+            FROM translation_rows {where} GROUP BY row_type ORDER BY COUNT(*) DESC
+        """, params).fetchall()
+    return [{"row_type": r[0] or "Unknown", "total": r[1], "translated": r[2] or 0, "empty": r[3] or 0,
+             "locked": r[4] or 0, "translatable": (r[0] in config.TRANSLATABLE_TYPES)} for r in rows]
 
-def get_translator() -> OpenRouterTranslator:
-    provider = bridge.get_setting("active_provider", "gemini")
-    sys_prompt = bridge.get_setting("system_prompt")
 
+# ==========================================
+# TRANSLATION
+# ==========================================
+def _persist_key_rotation(_old_idx, new_idx, *_args):
+    keys = json.loads(bridge.get_setting("gemini_keys") or "[]")
+    idx = new_idx - 1
+    bridge.set_setting("gemini_active_key_index", str(idx))
+    if 0 <= idx < len(keys):
+        bridge.set_setting("gemini_key", keys[idx])
+
+
+def _gemini_keys() -> list:
+    try:
+        keys = json.loads(bridge.get_setting("gemini_keys") or "[]")
+    except ValueError:
+        keys = []
+    if not keys and bridge.get_setting("gemini_key"):
+        keys = [bridge.get_setting("gemini_key")]
+    return [k for k in keys if isinstance(k, str) and k.strip()]
+
+
+def get_translator(db_path: str) -> OpenRouterTranslator:
+    provider = bridge.get_setting("active_provider")
+    prompt = bridge.get_setting("system_prompt")
+    glossary = pipeline.load_glossary(db_path)
     if provider == "gemini":
-        base_url = bridge.get_setting("gemini_base_url", "https://generativelanguage.googleapis.com/v1beta/openai")
-        keys_json = bridge.get_setting("gemini_keys", "")
-        keys_list = []
-        if keys_json:
-            try:
-                keys_list = json.loads(keys_json)
-            except Exception:
-                pass
-        if not keys_list:
-            single = bridge.get_setting("gemini_key", "")
-            if single:
-                keys_list = [single]
+        models = [bridge.get_setting(f"gemini_model_{i}").strip() for i in range(1, 6)]
+        return OpenRouterTranslator(_gemini_keys(), [m for m in models if m], prompt,
+                                    bridge.get_setting("gemini_base_url"),
+                                    active_key_index=int(bridge.get_setting("gemini_active_key_index") or 0),
+                                    glossary=glossary, on_key_rotate=_persist_key_rotation)
+    if provider == "kaggle":
+        base = bridge.get_setting("kaggle_base_url")
+        if not base:
+            raise HTTPException(status_code=400, detail="Chưa cấu hình Base URL cho Kaggle/Local LLM.")
+        return OpenRouterTranslator(bridge.get_setting("kaggle_key"), bridge.get_setting("kaggle_model"), prompt,
+                                    base, glossary=glossary)
+    return OpenRouterTranslator(bridge.get_setting("openrouter_key"), bridge.get_setting("openrouter_model"),
+                                prompt, bridge.get_setting("openrouter_base_url"), glossary=glossary)
 
-        active_idx = int(bridge.get_setting("gemini_active_key_index", "0"))
 
-        m1 = bridge.get_setting("gemini_model_1", "gemini-3.5-flash-lite")
-        m2 = bridge.get_setting("gemini_model_2", "gemini-3-flash-preview")
-        m3 = bridge.get_setting("gemini_model_3", "gemini-2.5-flash")
-        m4 = bridge.get_setting("gemini_model_4", "gemini-3.1-flash-lite")
-        m5 = bridge.get_setting("gemini_model_5", "gemini-2.5-flash-lite")
-        models = [m.strip() for m in [m1, m2, m3, m4, m5] if m.strip()]
-        return OpenRouterTranslator(keys_list or ["local"], models or ["gemini-3.5-flash-lite"], sys_prompt, base_url, active_key_index=active_idx)
-    elif provider == "kaggle":
-        base_url = bridge.get_setting("kaggle_base_url", "https://immune-passive-vegas-district.trycloudflare.com/v1")
-        api_key = bridge.get_setting("kaggle_key", "local")
-        model = bridge.get_setting("kaggle_model", "qwen2.5:32b")
-        return OpenRouterTranslator(api_key, model, sys_prompt, base_url)
-    else:
-        base_url = bridge.get_setting("openrouter_base_url", "https://openrouter.ai/api/v1")
-        api_key = bridge.get_setting("openrouter_key", "")
-        model = bridge.get_setting("openrouter_model", "deepseek/deepseek-v4.1-flash-1017")
-        return OpenRouterTranslator(api_key, model, sys_prompt, base_url)
+def _batch_size() -> int:
+    try:
+        return min(max(1, int(bridge.get_setting("batch_size"))), 100)
+    except ValueError:
+        return 15
+
 
 class TranslateSingleRequest(BaseModel):
     id: int
 
+
 @app.post("/api/translate/single")
 def translate_single(req: TranslateSingleRequest):
-    with sqlite3.connect(bridge.db_path) as conn:
-        row = conn.execute("SELECT raw, translated FROM translation_rows WHERE id = ?", (req.id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Row not found")
-        raw_text = row[0]
-        cur_trans = row[1]
-
-    tr = get_translator()
+    db_path = bridge.db_path
+    rows = pipeline.select_rows(db_path, overwrite=True, row_ids=[req.id])
+    if not rows:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dòng hoặc dòng đang bị khóa")
+    tr = get_translator(db_path)
     try:
-        translated_text = tr.translate_single(raw_text)
+        text = tr.translate_single(rows[0][2])
     except TranslationAPIError as err:
-        raise HTTPException(status_code=400, detail=f"Lỗi AI ({err.status_code}): {err.message}")
-    except Exception as err:
-        raise HTTPException(status_code=500, detail=f"Lỗi dịch thuật: {str(err)}")
+        raise HTTPException(status_code=502, detail=f"Lỗi AI ({err.status_code}): {err.message}")
+    pipeline.write_results(db_path, {rows[0][2]: rows}, {rows[0][2]: text}, auto_fill=True, overwrite=False,
+                           max_line_chars=bridge.max_line_chars())
+    with connect(db_path) as conn:
+        r = conn.execute(f"SELECT {ROW_COLUMNS} FROM translation_rows WHERE id = ?", (req.id,)).fetchone()
+    return _row_dict(r)
 
-    new_trans = cur_trans if cur_trans.strip() else translated_text
-    new_status = 2 if new_trans.strip() else 1
 
-    with sqlite3.connect(bridge.db_path) as conn:
-        conn.execute(
-            "UPDATE translation_rows SET mtl = ?, translated = ?, status = ? WHERE id = ?",
-            (translated_text, new_trans, new_status, req.id)
-        )
-        conn.commit()
+class TranslateBatchRequest(BaseModel):
+    row_ids: List[int]
 
-    return {"id": req.id, "mtl": translated_text, "translated": new_trans, "status": new_status}
+
+@app.post("/api/translate/batch")
+def translate_batch(req: TranslateBatchRequest):
+    db_path = bridge.db_path
+    rows = pipeline.select_rows(db_path, row_ids=req.row_ids)
+    tr = get_translator(db_path)
+    last = {}
+    for event in pipeline.run_translation(db_path, rows, tr, _batch_size(), auto_fill=True,
+                                          max_line_chars=bridge.max_line_chars()):
+        if event["type"] == "error":
+            raise HTTPException(status_code=502, detail=f"Lỗi AI ({event['code']}): {event['message']}")
+        last = event
+    return {"success": True, "translated_count": last.get("total_translated", 0), "qa": last.get("qa", 0)}
+
 
 @app.get("/api/translate/stream")
 def stream_translate(
     file: Optional[str] = Query(None),
     overwrite: bool = Query(False),
     auto_fill: bool = Query(True),
-    types: Optional[str] = Query(None)
+    types: Optional[str] = Query(None),
 ):
+    db_path = bridge.db_path  # snapshot: a project switch mid-run must not redirect writes
+    type_list = [t.strip() for t in (types or "").split(",") if t.strip()] or None
+    rows = pipeline.select_rows(db_path, file=file, overwrite=overwrite, types=type_list)
+    tr = get_translator(db_path)
+    batch_size, max_chars = _batch_size(), bridge.max_line_chars()
+    label = file if file and file != "ALL" else "Toàn bộ Game"
+
     def event_stream():
-        batch_size = int(bridge.get_setting("batch_size", "15"))
-        tr = get_translator()
-
-        with sqlite3.connect(bridge.db_path) as conn:
-            conditions = []
-            params = []
-            if file and file != "ALL":
-                conditions.append("file = ?")
-                params.append(file)
-            conditions.append("file NOT LIKE '%CDataBase.json%'")
-            if not overwrite:
-                conditions.append("status = 0")
-            if types:
-                type_list = [t.strip() for t in types.split(",") if t.strip()]
-                if type_list:
-                    conditions.append(f"row_type IN ({','.join(['?']*len(type_list))})")
-                    params.extend(type_list)
-
-            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-            sql = f"SELECT id, file, raw, translated FROM translation_rows {where} ORDER BY file, id"
-            rows = conn.execute(sql, params).fetchall()
-
-        total = len(rows)
-        yield f"data: {json.dumps({'type': 'start', 'total': total, 'file': file or 'Toàn bộ Game'})}\n\n"
-
-        if total == 0:
-            yield f"data: {json.dumps({'type': 'complete', 'total_translated': 0, 'message': 'Không có dòng nào cần dịch.'})}\n\n"
-            return
-
-        total_done = 0
-        for i in range(0, total, batch_size):
-            chunk = rows[i:i + batch_size]
-            chunk_ids = [r[0] for r in chunk]
-            chunk_files = [r[1] for r in chunk]
-            chunk_texts = [r[2] for r in chunk]
-            chunk_trans = [r[3] for r in chunk]
-
-            current_file_name = chunk_files[0] if chunk_files else ""
-            fallback_events = []
-            key_rotate_events = []
-
-            def on_fallback(from_m, to_m, nv_num, reason="Rate Limit"):
-                fallback_events.append((from_m, to_m, nv_num, reason))
-
-            def on_key_rotate(old_idx, new_idx, old_masked, new_masked, reason="Quota Exceeded"):
-                bridge.set_setting("gemini_active_key_index", str(new_idx - 1))
-                if new_idx - 1 < len(tr.api_keys):
-                    bridge.set_setting("gemini_key", tr.api_keys[new_idx - 1])
-                key_rotate_events.append((old_idx, new_idx, old_masked, new_masked, reason))
-
-            try:
-                translations = tr.translate_batch(chunk_texts, on_fallback=on_fallback, on_key_rotate=on_key_rotate)
-            except TranslationAPIError as err:
-                yield f"data: {json.dumps({'type': 'error', 'code': err.status_code, 'message': err.message})}\n\n"
-                return
-            except Exception as err:
-                yield f"data: {json.dumps({'type': 'error', 'code': 500, 'message': str(err)})}\n\n"
-                return
-
-            # Emit key rotation events first if any occurred
-            for old_idx, new_idx, old_masked, new_masked, reason in key_rotate_events:
-                yield f"data: {json.dumps({'type': 'key_rotate', 'old_idx': old_idx, 'new_idx': new_idx, 'old_key': old_masked, 'new_key': new_masked, 'reason': reason, 'message': f'🔑 Key #{old_idx} ({old_masked}) đã hết quota ngày! Tự động xoay sang Key #{new_idx} ({new_masked}) để tiếp tục dịch.'})}\n\n"
-
-            # Emit model fallback notifications if any occurred
-            for from_m, to_m, nv_num, reason in fallback_events:
-                yield f"data: {json.dumps({'type': 'fallback', 'from_model': from_m, 'to_model': to_m, 'priority': nv_num, 'reason': reason, 'message': f'⚠️ Model {from_m} gặp sự cố [{reason}]! Đã tự động chuyển sang NV{nv_num} ({to_m}) cho batch này.'})}\n\n"
-
-            batch_items = []
-            with sqlite3.connect(bridge.db_path, check_same_thread=False) as conn:
-                for row_id, raw_txt, mtl_txt, cur_trans in zip(chunk_ids, chunk_texts, translations, chunk_trans):
-                    if auto_fill:
-                        final_trans = mtl_txt if (overwrite or not cur_trans.strip()) else cur_trans
-                        status = 2
-                    else:
-                        final_trans = cur_trans
-                        status = 2 if cur_trans.strip() else 1
-
-                    conn.execute(
-                        "UPDATE translation_rows SET mtl = ?, translated = ?, status = ? WHERE id = ?",
-                        (mtl_txt, final_trans, status, row_id)
-                    )
-                    batch_items.append({
-                        "id": row_id,
-                        "raw": raw_txt,
-                        "translated": final_trans or mtl_txt
-                    })
-
-                conn.commit()
-            total_done += len(chunk)
-            percent = round((total_done / total) * 100, 1)
-
-            yield f"data: {json.dumps({'type': 'progress', 'done': total_done, 'total': total, 'percent': percent, 'current_file': current_file_name, 'batch_size': len(chunk), 'items': batch_items})}\n\n"
-
-        yield f"data: {json.dumps({'type': 'complete', 'total_translated': total_done, 'message': f'Hoàn thành dịch {total_done} dòng!'})}\n\n"
+        for event in pipeline.run_translation(db_path, rows, tr, batch_size, auto_fill, overwrite, max_chars):
+            if event["type"] == "start":
+                event["file"] = label
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-@app.post("/api/patch")
-def patch_game():
-    res = bridge.patch_to_game()
-    return res
 
+# ==========================================
+# QUALITY / MEMORY / GLOSSARY
+# ==========================================
+@app.post("/api/qa/recheck")
+def qa_recheck():
+    return {"success": True, "changes": pipeline.recheck_qa(bridge.db_path, bridge.max_line_chars())}
+
+
+@app.post("/api/tm/unify")
+def tm_unify():
+    return {"success": True, **pipeline.unify_duplicates(bridge.db_path, bridge.max_line_chars())}
+
+
+@app.get("/api/validate")
+def validate():
+    from validator import validate_project
+    ctx = bridge.require()
+    return validate_project(ctx.project_dir, ctx.db_path, bridge.max_line_chars())
+
+
+class GlossaryEntry(BaseModel):
+    src: str
+    dst: str
+    note: Optional[str] = ""
+
+
+class GlossaryRequest(BaseModel):
+    entries: List[GlossaryEntry]
+
+
+@app.get("/api/glossary")
+def get_glossary():
+    return {"entries": bridge.get_glossary()}
+
+
+@app.post("/api/glossary")
+def set_glossary(req: GlossaryRequest):
+    return {"success": True, "count": bridge.set_glossary([e.dict() for e in req.entries])}
+
+
+# ==========================================
+# PATCH
+# ==========================================
+class PatchRequest(BaseModel):
+    force: bool = False
+
+
+@app.post("/api/patch")
+def patch_game(req: Optional[PatchRequest] = None):
+    try:
+        return bridge.patch_to_game(force=bool(req and req.force))
+    except WolfTLError as e:
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/patch/restore")
+def restore_original():
+    try:
+        return bridge.restore_original_text()
+    except WolfTLError as e:
+        return {"success": False, "message": str(e)}
+
+
+# ==========================================
+# SETTINGS
+# ==========================================
 class SettingsTestModel(BaseModel):
     provider: Optional[str] = "gemini"
     base_url: Optional[str] = ""
     api_key: Optional[str] = ""
     model: str
 
+
 @app.post("/api/settings/test")
 def test_ai_connection(s: SettingsTestModel):
-    res = test_connection(s.base_url, s.api_key, s.model)
-    return res
+    return test_connection(s.base_url, s.api_key, s.model, s.provider or "")
+
 
 class SingleKeyTestModel(BaseModel):
     api_key: str
-    base_url: Optional[str] = "https://generativelanguage.googleapis.com/v1beta/openai"
-    model: Optional[str] = "gemini-3.5-flash-lite"
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+
 
 @app.post("/api/settings/test-key")
 def test_single_key(req: SingleKeyTestModel):
-    base_url = (req.base_url or "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/")
-    url = f"{base_url}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {req.api_key.strip()}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": req.model or "gemini-3.5-flash-lite",
-        "messages": [{"role": "user", "content": "1"}],
-        "temperature": 0.1,
-        "max_tokens": 5
-    }
+    base_url = (req.base_url or config.GEMINI_BASE_URL).rstrip("/")
+    payload = {"model": req.model or config.GEMINI_DEFAULT_MODELS[0],
+               "messages": [{"role": "user", "content": "1"}], "temperature": 0.1, "max_tokens": 5}
     t0 = time.time()
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=8)
-        ms = round((time.time() - t0) * 1000)
-        if r.status_code == 200:
-            return {"ok": True, "status_code": 200, "message": f"✅ Sẵn sàng ({ms}ms)"}
-        elif r.status_code == 429:
-            return {"ok": False, "status_code": 429, "message": f"⚠️ Hết Quota (429)"}
-        elif r.status_code in (401, 403):
-            return {"ok": False, "status_code": r.status_code, "message": f"❌ Key lỗi ({r.status_code})"}
-        elif r.status_code == 404:
-            return {"ok": False, "status_code": 404, "message": f"⚠️ Model không hỗ trợ (404)"}
-        else:
-            return {"ok": False, "status_code": r.status_code, "message": f"Lỗi {r.status_code}"}
+        r = requests.post(f"{base_url}/chat/completions", json=payload, timeout=8,
+                          headers={"Authorization": f"Bearer {req.api_key.strip()}",
+                                   "Content-Type": "application/json"})
     except requests.exceptions.Timeout:
         return {"ok": False, "status_code": 408, "message": "❌ Timeout (8s)"}
     except Exception as e:
         return {"ok": False, "status_code": 500, "message": f"Lỗi: {str(e)[:30]}"}
+    ms = round((time.time() - t0) * 1000)
+    messages = {200: f"✅ Sẵn sàng ({ms}ms)", 429: "⚠️ Hết Quota (429)", 401: "❌ Key lỗi (401)",
+                403: "❌ Key lỗi (403)", 404: "⚠️ Model không hỗ trợ (404)"}
+    return {"ok": r.status_code == 200, "status_code": r.status_code,
+            "message": messages.get(r.status_code, f"Lỗi {r.status_code}")}
+
 
 class GeminiSettings(BaseModel):
-    base_url: Optional[str] = "https://generativelanguage.googleapis.com/v1beta/openai"
-    api_key: Optional[str] = ""
-    keys: Optional[List[str]] = []
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    keys: Optional[List[str]] = None
     active_key_index: Optional[int] = 0
-    model_1: Optional[str] = "gemini-3.5-flash-lite"
-    model_2: Optional[str] = "gemini-3-flash-preview"
-    model_3: Optional[str] = "gemini-2.5-flash"
-    model_4: Optional[str] = "gemini-3.1-flash-lite"
-    model_5: Optional[str] = "gemini-2.5-flash-lite"
+    model_1: Optional[str] = None
+    model_2: Optional[str] = None
+    model_3: Optional[str] = None
+    model_4: Optional[str] = None
+    model_5: Optional[str] = None
+
 
 class KaggleSettings(BaseModel):
-    base_url: Optional[str] = ""
-    api_key: Optional[str] = "local"
-    model: Optional[str] = "qwen2.5:32b"
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+
 
 class OpenRouterSettings(BaseModel):
-    base_url: Optional[str] = "https://openrouter.ai/api/v1"
-    api_key: Optional[str] = ""
-    model: Optional[str] = "deepseek/deepseek-v4.1-flash-1017"
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+
 
 class FullSettingsModel(BaseModel):
-    active_provider: Optional[str] = "gemini"
-    batch_size: Optional[str] = "15"
-    system_prompt: Optional[str] = ""
+    active_provider: Optional[str] = None
+    batch_size: Optional[str] = None
+    system_prompt: Optional[str] = None
+    qa_max_line_chars: Optional[str] = None
     gemini: Optional[GeminiSettings] = None
     kaggle: Optional[KaggleSettings] = None
     openrouter: Optional[OpenRouterSettings] = None
 
+
+def _set_or_default(key: str, value: Optional[str]):
+    """Save a value; empty/None falls back to the documented default."""
+    value = (value or "").strip()
+    bridge.set_setting(key, value or config.DEFAULT_SETTINGS.get(key, ""))
+
+
 @app.get("/api/settings")
 def get_settings():
-    provider = bridge.get_setting("active_provider", "gemini")
-    
-    keys_json = bridge.get_setting("gemini_keys", "")
-    gemini_keys_list = []
-    if keys_json:
-        try:
-            gemini_keys_list = json.loads(keys_json)
-        except Exception:
-            pass
-    if not gemini_keys_list:
-        single = bridge.get_setting("gemini_key", "")
-        if single:
-            gemini_keys_list = [single]
-
-    active_idx = int(bridge.get_setting("gemini_active_key_index", "0"))
-    if gemini_keys_list:
-        active_idx = min(max(0, active_idx), len(gemini_keys_list) - 1)
-        cur_k = gemini_keys_list[active_idx]
-        masked = cur_k[:6] + "..." + cur_k[-4:] if len(cur_k) > 10 else "***"
-        key_tag = f"Key #{active_idx + 1}/{len(gemini_keys_list)}"
-    else:
-        key_tag = "Chưa có Key"
-
+    g = bridge.get_setting
+    provider = g("active_provider")
+    keys = _gemini_keys()
+    active_idx = min(max(0, int(g("gemini_active_key_index") or 0)), max(0, len(keys) - 1))
+    key_tag = f"Key #{active_idx + 1}/{len(keys)}" if keys else "Chưa có Key"
     if provider == "gemini":
-        display = f"Gemini: {bridge.get_setting('gemini_model_1', 'gemini-3.5-flash-lite')} ({key_tag})"
+        display = f"Gemini: {g('gemini_model_1')} ({key_tag})"
     elif provider == "kaggle":
-        display = f"Kaggle: {bridge.get_setting('kaggle_model', 'qwen2.5:32b')}"
+        display = f"Kaggle: {g('kaggle_model')}"
     else:
-        display = f"OpenRouter: {bridge.get_setting('openrouter_model', 'deepseek/deepseek-v4.1-flash-1017')}"
-
+        display = f"OpenRouter: {g('openrouter_model')}"
     return {
         "active_provider": provider,
         "active_model_display": display,
-        "batch_size": bridge.get_setting("batch_size", "15"),
-        "system_prompt": bridge.get_setting("system_prompt"),
-        "gemini": {
-            "base_url": bridge.get_setting("gemini_base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
-            "api_key": bridge.get_setting("gemini_key", ""),
-            "keys": gemini_keys_list,
-            "active_key_index": active_idx,
-            "model_1": bridge.get_setting("gemini_model_1", "gemini-3.5-flash-lite"),
-            "model_2": bridge.get_setting("gemini_model_2", "gemini-3-flash-preview"),
-            "model_3": bridge.get_setting("gemini_model_3", "gemini-2.5-flash"),
-            "model_4": bridge.get_setting("gemini_model_4", "gemini-3.1-flash-lite"),
-            "model_5": bridge.get_setting("gemini_model_5", "gemini-2.5-flash-lite"),
-        },
-        "kaggle": {
-            "base_url": bridge.get_setting("kaggle_base_url", "https://immune-passive-vegas-district.trycloudflare.com/v1"),
-            "api_key": bridge.get_setting("kaggle_key", "local"),
-            "model": bridge.get_setting("kaggle_model", "qwen2.5:32b"),
-        },
-        "openrouter": {
-            "base_url": bridge.get_setting("openrouter_base_url", "https://openrouter.ai/api/v1"),
-            "api_key": bridge.get_setting("openrouter_key", ""),
-            "model": bridge.get_setting("openrouter_model", "deepseek/deepseek-v4.1-flash-1017"),
-        }
+        "batch_size": g("batch_size"),
+        "system_prompt": g("system_prompt"),
+        "default_system_prompt": config.DEFAULT_SYSTEM_PROMPT,
+        "qa_max_line_chars": g("qa_max_line_chars"),
+        "gemini": {"base_url": g("gemini_base_url"), "api_key": keys[active_idx] if keys else "", "keys": keys,
+                   "active_key_index": active_idx, **{f"model_{i}": g(f"gemini_model_{i}") for i in range(1, 6)}},
+        "kaggle": {"base_url": g("kaggle_base_url"), "api_key": g("kaggle_key"), "model": g("kaggle_model")},
+        "openrouter": {"base_url": g("openrouter_base_url"), "api_key": g("openrouter_key"),
+                       "model": g("openrouter_model")},
     }
+
 
 @app.post("/api/settings")
 def save_settings(s: FullSettingsModel):
-    if s.active_provider:
+    if s.active_provider in ("gemini", "kaggle", "openrouter"):
         bridge.set_setting("active_provider", s.active_provider)
-    if s.batch_size:
-        bridge.set_setting("batch_size", s.batch_size)
-    if s.system_prompt:
-        bridge.set_setting("system_prompt", s.system_prompt)
+    if s.batch_size is not None:
+        _set_or_default("batch_size", s.batch_size if s.batch_size.strip().isdigit() else "")
+    if s.system_prompt is not None:  # empty => back to the default prompt
+        _set_or_default("system_prompt", s.system_prompt)
+    if s.qa_max_line_chars is not None:
+        _set_or_default("qa_max_line_chars", s.qa_max_line_chars if s.qa_max_line_chars.strip().isdigit() else "")
 
     if s.gemini:
-        bridge.set_setting("gemini_base_url", s.gemini.base_url or "https://generativelanguage.googleapis.com/v1beta/openai")
-        if s.gemini.keys is not None and len(s.gemini.keys) > 0:
-            clean_keys = [k.strip() for k in s.gemini.keys if k and k.strip()]
-            bridge.set_setting("gemini_keys", json.dumps(clean_keys))
-            idx = s.gemini.active_key_index or 0
-            if clean_keys:
-                idx = min(max(0, idx), len(clean_keys) - 1)
-                bridge.set_setting("gemini_key", clean_keys[idx])
+        _set_or_default("gemini_base_url", s.gemini.base_url)
+        if s.gemini.keys is not None:
+            keys = [k.strip() for k in s.gemini.keys if k and k.strip()]
+        elif s.gemini.api_key is not None:
+            keys = [s.gemini.api_key.strip()] if s.gemini.api_key.strip() else []
+        else:
+            keys = None
+        if keys is not None:
+            idx = min(max(0, s.gemini.active_key_index or 0), max(0, len(keys) - 1))
+            bridge.set_setting("gemini_keys", json.dumps(keys))
+            bridge.set_setting("gemini_key", keys[idx] if keys else "")
             bridge.set_setting("gemini_active_key_index", str(idx))
-        elif s.gemini.api_key:
-            bridge.set_setting("gemini_key", s.gemini.api_key.strip())
-            bridge.set_setting("gemini_keys", json.dumps([s.gemini.api_key.strip()]))
-            bridge.set_setting("gemini_active_key_index", "0")
-
-        bridge.set_setting("gemini_model_1", s.gemini.model_1 or "gemini-3.5-flash-lite")
-        bridge.set_setting("gemini_model_2", s.gemini.model_2 or "gemini-3-flash-preview")
-        bridge.set_setting("gemini_model_3", s.gemini.model_3 or "gemini-2.5-flash")
-        bridge.set_setting("gemini_model_4", s.gemini.model_4 or "gemini-3.1-flash-lite")
-        bridge.set_setting("gemini_model_5", s.gemini.model_5 or "gemini-2.5-flash-lite")
-
+        for i in range(1, 6):
+            _set_or_default(f"gemini_model_{i}", getattr(s.gemini, f"model_{i}"))
     if s.kaggle:
-        bridge.set_setting("kaggle_base_url", s.kaggle.base_url or "")
-        bridge.set_setting("kaggle_key", s.kaggle.api_key or "local")
-        bridge.set_setting("kaggle_model", s.kaggle.model or "qwen2.5:32b")
-
+        bridge.set_setting("kaggle_base_url", (s.kaggle.base_url or "").strip())
+        _set_or_default("kaggle_key", s.kaggle.api_key)
+        _set_or_default("kaggle_model", s.kaggle.model)
     if s.openrouter:
-        bridge.set_setting("openrouter_base_url", s.openrouter.base_url or "https://openrouter.ai/api/v1")
-        bridge.set_setting("openrouter_key", s.openrouter.api_key or "")
-        bridge.set_setting("openrouter_model", s.openrouter.model or "deepseek/deepseek-v4.1-flash-1017")
-
-    # Legacy fallback keys
-    if s.active_provider == "gemini":
-        bridge.set_setting("base_url", s.gemini.base_url if s.gemini else "https://generativelanguage.googleapis.com/v1beta/openai")
-        bridge.set_setting("model", s.gemini.model_1 if s.gemini else "gemini-3.5-flash-lite")
-    elif s.active_provider == "kaggle":
-        bridge.set_setting("base_url", s.kaggle.base_url if s.kaggle else "")
-        bridge.set_setting("model", s.kaggle.model if s.kaggle else "qwen2.5:32b")
-    else:
-        bridge.set_setting("base_url", s.openrouter.base_url if s.openrouter else "https://openrouter.ai/api/v1")
-        bridge.set_setting("model", s.openrouter.model if s.openrouter else "deepseek/deepseek-v4.1-flash-1017")
-
+        _set_or_default("openrouter_base_url", s.openrouter.base_url)
+        bridge.set_setting("openrouter_key", (s.openrouter.api_key or "").strip())
+        _set_or_default("openrouter_model", s.openrouter.model)
     return {"success": True}
 
+
 if __name__ == "__main__":
-    print("Starting Nelir Wolf Translator on http://127.0.0.1:8765...")
-    uvicorn.run(app, host="127.0.0.1", port=8765)
+    print(f"Starting Nelir Wolf Translator on http://{config.HOST}:{config.PORT} ...")
+    uvicorn.run(app, host=config.HOST, port=config.PORT)
