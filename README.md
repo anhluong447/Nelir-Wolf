@@ -1,108 +1,126 @@
-# 🐺 Nelir WOLF RPG Translator
+# Nelir WOLF RPG Translator
 
-Nền tảng hỗ trợ dịch thuật và bản địa hóa game phát triển trên engine **WOLF RPG Editor** sang tiếng Việt, tích hợp AI đa luồng (Google Gemini, OpenRouter, Kaggle / Local LLM), cơ chế xoay API Key tự động khi đạt giới hạn hạn mức (Rate Limit / Quota), kiến trúc Đa Dự Án (Multi-Project) độc lập và định dạng đóng gói dự án chuyên dụng **`.nel`**.
-
----
-
-## 🚀 Tính Năng Nổi Bật
-
-### 1. Kiến Trúc Đa Dự Án (Multi-Project)
-* Quản lý cùng lúc nhiều game WOLF RPG trên cùng một giao diện.
-* Mỗi game sở hữu một không gian độc lập: cơ sở dữ liệu dịch thuật SQLite riêng (`translation.db`), thư mục dump kịch bản riêng, và cấu hình đường dẫn cài đặt game riêng.
-* Cấu hình AI (API Keys, danh sách model, prompt hệ thống, theme) được lưu tập trung trong `global_settings.db`, dùng chung cho toàn bộ các game mà không cần nhập lại.
-
-### 2. Định Dạng Gói Dự Án `.nel` (Nelir Project Package)
-* Đóng gói toàn bộ tiến độ dịch thuật (hàng chục nghìn câu thoại, trạng thái dịch, metadata) thành một tệp `.nel` nén nhỏ gọn (~1–2 MB).
-* **Xuất (`💾 Lưu .nel`)**: Tải về tệp sao lưu chỉ với 1 cú click.
-* **Nạp (`📂 Nạp .nel`)**: Dễ dàng chia sẻ dự án cho người khác hoặc khôi phục tiến độ dịch trên máy mới.
-
-### 3. Hệ Thống Dịch AI Thông Minh & Xoay Tua Hạn Mức (Key & Model Rotation)
-* **Google Gemini (AI Studio Free Tier)**: Hỗ trợ cấu hình danh sách nhiều API Key. Tự động xoay sang Key tiếp theo khi Key hiện tại đạt giới hạn quota ngày (429 / ResourceExhausted).
-* **Xoay tua Model đa cấp độ**: Thiết lập danh sách nguyện vọng model ưu tiên (NV1 ➔ NV2 ➔ NV3). Khi model NV1 dính giới hạn RPM/TPM, hệ thống tạm thời chuyển sang NV2/NV3 cho batch đó và lập tức ưu tiên lại NV1 ngay khi quota hồi phục.
-* **Hỗ trợ Kaggle / Local LLM & OpenRouter**: Dễ dàng kết nối với các model mã nguồn mở chạy local (Qwen 2.5 32B, Llama 3) hoặc hàng trăm model trên OpenRouter.
-
-### 4. Khóa Logic Tự Động (không còn dịch "gãy" game)
-* Chỉ các loại hiển thị cho người chơi mới được dịch: `Message`, `Choice`, `SetString`, `Picture`, `DBName`, `DBField`, `GameTitle`.
-* Các lệnh logic của engine (`Database`, `StringCondition`, `JumpLabel`, `SetLabel`, `CommonEvent`, `CommonEventByName`, `Comment`, `DebugMessage`) luôn bị khóa 🔒.
-* Một chuỗi `SetString` / `DBName` / `DBField` mà lệnh khác dùng để tra cứu / so sánh (ví dụ tên nhân vật được so sánh để chọn ảnh chân dung) cũng bị khóa và luôn được vá bằng bản gốc, tránh lỗi `the data name does not exist` hoặc rẽ nhánh sai.
-* `CDataBase` (bộ nhớ runtime của engine) không bao giờ được bóc tách hay vá.
-
-### 5. Kiểm Tra Chất Lượng (QA) & Trạng Thái Rõ Ràng
-* Trạng thái: `○` chưa dịch · `~` AI dịch (chưa duyệt) · `✓` đã duyệt · `⚠` AI dịch lỗi QA · `🔒` bị khóa.
-* QA tự động: bản dịch giống câu gốc, còn sót chữ Nhật/Hán, sai số dòng, thiếu mã điều khiển (`\c[]`, `\s[]`, `\E`, `<C>`, `@1`...), dòng quá dài (cảnh báo).
-* AI lỗi / hết quota thì dòng giữ nguyên, **không bao giờ** lưu câu tiếng Nhật thành "đã dịch".
-
-### 6. Bộ Nhớ Dịch & Bảng Thuật Ngữ
-* Câu gốc trùng nhau chỉ gửi lên AI một lần, rồi điền cho mọi chỗ trùng (tiết kiệm quota, dịch thống nhất).
-* Câu đã từng dịch được tái sử dụng ngay (ưu tiên bản đã duyệt).
-* Glossary theo dự án (`🛠️ Công cụ → 📖 Bảng thuật ngữ`) được gửi kèm prompt khi câu có chứa thuật ngữ.
-* `♻️ Đồng bộ bản dịch của các câu trùng nhau` gom các bản dịch lệch nhau của cùng một câu gốc.
-
-### 7. Vá Bản Dịch An Toàn (Patch to Game)
-* Mỗi dự án giữ một bản dump gốc tiếng Nhật (`dump_original/`); mỗi lần Patch, dump làm việc được dựng lại từ bản gốc + bản dịch, rồi chạy `WolfTL --patch --inplace`.
-* Trước khi ghi, mỗi dòng được đối chiếu `path` ↔ câu gốc; dòng lệch (game đã cập nhật) bị bỏ qua và báo lại.
-* Patch bị **chặn** nếu bản dịch tạo ra lỗi logic mới (tra cứu Database / nhãn nhảy) so với game gốc.
-* Lần Patch đầu tiên tự sao lưu `Data/BasicData` + `Data/MapData` vào `projects/<id>/game_backup/`.
-* `↩️ Khôi phục văn bản gốc` ghi lại toàn bộ tiếng Nhật vào game bất cứ lúc nào; dữ liệu dịch không mất.
-* Trích xuất lại (khi game cập nhật) gộp theo `(file, path, câu gốc)`, giữ nguyên bản dịch của các câu không đổi.
+Nelir WOLF RPG Translator is an automated translation and localization platform designed specifically for games created with the WOLF RPG Editor engine. It provides an end-to-end localization workflow featuring multi-engine AI translation (Google Gemini, OpenRouter, Kaggle / Local LLMs), intelligent API key and model fallback rotation, an isolated multi-project architecture, engine logic safety locking, automated translation QA, and non-destructive binary game patching via WolfTL.
 
 ---
 
-## 🛠️ Cài Đặt & Khởi Chạy
+## Key Features
 
-### Yêu Cầu Hệ Thống:
-* Python 3.10 trở lên.
-* Windows OS.
+### 1. Multi-Project Architecture
+* **Isolated Project Workspaces**: Manage translations for multiple WOLF RPG games within a single unified web interface. Each project maintains its own independent SQLite database (`translation.db`), raw script dump files, and target game installation paths.
+* **Centralized Configuration**: Global settings—including API keys, provider endpoints, prioritized fallback models, system prompts, and interface themes—are managed centrally in `global_settings.db`, shared across projects without redundant re-entry.
 
-### Cài đặt thư viện:
-```bash
-pip install fastapi uvicorn requests python-multipart
-```
+### 2. Portable Project Packaging (.nel Format)
+* **Single-File Archiving**: Export the entire translation state, string status flags, and project metadata into a compact, compressed `.nel` container (typically 1 to 2 MB).
+* **Seamless Export & Import**: Create standalone backup archives with one click or import `.nel` packages onto other systems to continue translation or apply patches immediately.
 
-### Khởi chạy ứng dụng:
-Chạy file `run.bat` hoặc lệnh:
-```bash
-python server.py
-```
-Sau đó truy cập giao diện web tại: **`http://127.0.0.1:8765`**
+### 3. Resilient AI Pipeline with Automatic Quota & Key Rotation
+* **Google Gemini Multi-Key Rotation**: Configure a pool of Google AI Studio API keys. When a key exhausts its daily quota or encounters HTTP 429 (`RESOURCE_EXHAUSTED`), the translation engine automatically shifts to the next available key in the pool.
+* **Tiered Model Fallbacks**: Establish primary and secondary model preferences (Priority 1 through Priority 5). If the primary model encounters rate limits or transient errors, requests transparently fail over to secondary models for that batch, automatically returning to the primary model when quota replenishes.
+* **Flexible Provider Support**: Fully compatible with OpenAI-compatible endpoints, including OpenRouter, Kaggle compute instances, and local LLM runners (such as Ollama or vLLM).
 
-### Kiểm tra & test:
-```bash
-python -m unittest discover -s tests -v      # test tự động (không cần mạng / WolfTL)
-python validator.py --project <project_id>   # kiểm tra logic một dự án
-```
-Biến môi trường `NELIR_DATA_DIR` cho phép chạy với một thư mục dữ liệu khác (chứa `projects/` và `global_settings.db`).
+### 4. Engine Logic Protection & Automatic Key Locking
+* **Selective Extraction**: Differentiates player-facing text (`Message`, `Choice`, `DBName`, `DBField`, `SetString`, `Picture`, `GameTitle`) from engine runtime scripts.
+* **Automated Key Locking**: Scans all Common Events and Map commands to detect strings used as variable references, database lookups, or comparison conditions. Any string referenced programmatically is permanently locked to its original Japanese value to prevent runtime errors (e.g., `the data name does not exist` or broken branching).
+* **Runtime Database Safeguards**: Internal engine work memory (`CDataBase.dat`) is strictly excluded from extraction and modification.
+
+### 5. Automated Quality Assurance (QA) Engine
+* **Status Classification**: Each row is tracked with explicit status semantics: Empty (`0`), Machine Translated (`1`), Human Reviewed (`2`), or QA Flagged (`3`).
+* **Automated Anomaly Detection**: Flags translations that retain unintended Japanese characters, mismatch original line counts, omit engine control codes (`\c[]`, `\s[]`, `\E`, `<C>`, `@1`), contain unclosed brackets, or exceed display window widths.
+* **Error Resilience**: Failed API requests raise structured exceptions rather than saving raw Japanese text as completed translations.
+
+### 6. Translation Memory & Glossary Management
+* **Deduplication**: Identical source strings within a batch are requested only once and populated across all occurrences, conserving API tokens and ensuring terminological consistency.
+* **Context-Aware Glossary Injection**: Project-specific glossaries are dynamically injected into translation prompts when matching source keywords are detected.
+* **Translation Synchronization**: Batch tools enable aligning diverging translations across identical source lines throughout the project.
+
+### 7. Non-Destructive Game Patching & Rollback
+* **Pristine Reference Dumps**: Each project retains an unmodified Japanese dump (`dump_original/`). During patch compilation, working files are synthesized dynamically from the original reference combined with translated rows, followed by execution of `WolfTL --patch --inplace`.
+* **Integrity Validation**: Verifies path-to-source integrity before writing. Patching is blocked if translations introduce new unresolved database queries or orphan labels compared to the source game.
+* **Automatic Rollback Backups**: Backs up `Data/BasicData` and `Data/MapData` prior to the initial patch operation. Full restoration to pristine Japanese data is available at any time without compromising translation database records.
 
 ---
 
-## 📁 Cấu Trúc Thư Mục
+## System Requirements
+
+* **Operating System**: Windows 10 / 11 (64-bit)
+* **Python**: Version 3.10 or higher
+* **Underlying Tool**: WolfTL (packaged in `bin/`)
+
+---
+
+## Installation & Setup
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/anhluong447/Nelir-Wolf.git
+   cd Nelir-Wolf
+   ```
+
+2. **Install required dependencies**:
+   ```bash
+   pip install fastapi uvicorn requests python-multipart
+   ```
+
+3. **Launch the application**:
+   Execute `run.bat` or run:
+   ```bash
+   python server.py
+   ```
+
+4. **Access the Web Interface**:
+   Open a modern web browser and navigate to:
+   ```
+   http://127.0.0.1:8765
+   ```
+
+---
+
+## Automated Testing & Validation
+
+The project includes an automated regression test suite operating on synthetic game dumps without requiring network access or external game binaries:
+
+```bash
+# Run unit and integration tests
+python -m unittest discover -s tests -v
+
+# Run static script verification on a specific project
+python validator.py --project <project_id>
+```
+
+The `NELIR_DATA_DIR` environment variable can be set to point tests or portable deployments to an alternative data directory containing `projects/` and `global_settings.db`.
+
+---
+
+## Directory Structure
 
 ```
 Nelir-Wolf/
-├── bin/
-│   └── WolfTL.exe                  # Công cụ bóc tách & vá game WOLF RPG
-├── projects/                       # Thư mục chứa các dự án game
-│   └── <Tên_Game>/
-│       ├── project.json            # Thông tin game, đường dẫn cài đặt
-│       ├── translation.db          # Bản dịch, glossary, meta (SQLite)
-│       ├── dump_original/          # Dump gốc tiếng Nhật (không bao giờ bị sửa)
-│       ├── dump/                   # Dump làm việc, dựng lại mỗi lần Patch
-│       └── game_backup/            # Sao lưu BasicData/MapData trước lần Patch đầu
-├── static/                         # Giao diện người dùng (HTML, CSS, JS)
-├── tests/                          # Test tự động (unittest)
-├── config.py                       # Đường dẫn, giá trị mặc định, quy tắc loại chuỗi
-├── db.py                           # Kết nối SQLite & schema
-├── extractor.py                    # Bóc tách dump, đồng bộ DB, khóa logic, gọi WolfTL
-├── qa.py                           # Kiểm tra chất lượng bản dịch
-├── pipeline.py                     # Luồng dịch: bộ nhớ dịch → AI → QA → DB
-├── validator.py                    # Kiểm tra logic (nhãn / tra cứu DB / khóa)
-├── bridge.py                       # Dự án đang mở: chuẩn bị, Patch, khôi phục
-├── project_manager.py              # Quản lý đa dự án & xuất/nạp gói .nel
-├── openrouter.py                   # Client AI (OpenAI-compatible), xoay key & model
-└── server.py                       # FastAPI Backend Server
+|-- bin/
+|   `-- WolfTL.exe                  # Wolf RPG data extraction and patching binary
+|-- projects/                       # Translation project workspaces
+|   `-- <Project_ID>/
+|       |-- project.json            # Project metadata and game directory paths
+|       |-- translation.db          # Project SQLite database (translations, glossary, metadata)
+|       |-- dump_original/          # Unmodified pristine Japanese dump
+|       |-- dump/                   # Active working dump synchronized during patching
+|       `-- game_backup/            # Pristine game backup taken prior to initial patch
+|-- static/                         # Frontend user interface assets (HTML, CSS, JavaScript)
+|-- tests/                          # Automated unit test suite
+|-- config.py                       # Global configurations, defaults, and row type definitions
+|-- db.py                           # SQLite connection pooling and schema definitions
+|-- extractor.py                    # Dump parsing, database synchronization, and logic locking
+|-- qa.py                           # Translation quality assurance and control code verification
+|-- pipeline.py                     # Translation workflow (TM -> AI Translation -> QA -> Database)
+|-- validator.py                    # Static analysis engine (labels, database lookups, logic keys)
+|-- bridge.py                       # Project lifecycle controller (patching and restoration)
+|-- project_manager.py              # Multi-project lifecycle and .nel archive manager
+|-- openrouter.py                   # OpenAI-compatible API client with key and model rotation
+`-- server.py                       # FastAPI application server and REST API endpoints
 ```
 
 ---
 
-## 📜 Giấy Phép & Bản Quyền
-Dự án được phát triển phục vụ cộng đồng dịch thuật game RPG độc lập.
+## License & Disclaimers
+
+This software is developed for game localization, preservation, and research purposes. All trademarks, game assets, and engine binaries belong to their respective copyright holders. Users are responsible for ensuring compliance with the terms and licenses of the games they translate.
