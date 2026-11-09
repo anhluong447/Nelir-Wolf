@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nelir Wolf Translator</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐺</text></svg>">
+  <script>
+    // apply saved appearance before first paint (no flash)
+    try {
+      const ui = JSON.parse(localStorage.getItem('nelir.ui') || '{}');
+      const theme = ui.theme || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.dataset.theme = theme;
+      if (ui.density) document.documentElement.dataset.density = ui.density;
+      if (ui.fontsize) document.documentElement.dataset.fontsize = ui.fontsize;
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/views.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <!-- ============ TOPBAR ============ -->
+    <header class="topbar">
+      <button class="btn ghost icon-only" id="btnToggleSidebar" title="Ẩn/hiện danh sách file (Ctrl+B)"></button>
+      <div class="brand"><span class="brand-mark">🐺</span><span>Nelir Wolf</span></div>
+      <span class="sep"></span>
+
+      <div class="menu-wrap">
+        <button class="btn ghost project-btn" id="btnProject" title="Đổi dự án">
+          <span class="ellipsis" id="projectName">Đang tải…</span><span id="projectChevron"></span>
+        </button>
+        <div class="menu left project-menu" id="projectMenu"></div>
+      </div>
+
+      <div class="topbar-progress" title="">
+        <div class="stackbar" id="globalBar"></div>
+        <span class="label" id="globalLabel">—</span>
+      </div>
+
+      <div class="spacer"></div>
+
+      <button class="btn ghost model-pill" id="btnModel" title="Model AI đang dùng — bấm để mở cài đặt">
+        <span class="dot-live"></span><span class="ellipsis" id="modelName">…</span>
+      </button>
+
+      <div class="menu-wrap">
+        <div class="btn-group">
+          <button class="btn primary" id="btnTranslateMain" title="Dịch AI các dòng chưa dịch / lỗi QA trong phạm vi đang chọn"></button>
+          <button class="btn primary icon-only" id="btnTranslateMenu" title="Tùy chọn dịch"></button>
+        </div>
+        <div class="menu" id="translateMenu"></div>
+      </div>
+
+      <button class="btn success" id="btnPatch" title="Vá bản dịch vào game"></button>
+
+      <div class="menu-wrap">
+        <button class="btn icon-only" id="btnTools" title="Công cụ"></button>
+        <div class="menu" id="toolsMenu"></div>
+      </div>
+      <button class="btn icon-only" id="btnSettings" title="Cài đặt"></button>
+    </header>
+
+    <!-- ============ SIDEBAR ============ -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <div class="input-icon" id="fileSearchWrap"></div>
+      </div>
+      <nav class="file-tree" id="fileTree" aria-label="Danh sách file"></nav>
+      <div class="sidebar-foot" id="sidebarFoot"></div>
+    </aside>
+
+    <!-- ============ SEGMENT LIST ============ -->
+    <main class="list-pane">
+      <div class="filterbar">
+        <div class="scope" id="scopeLabel"></div>
+        <div class="chips" id="statusChips" role="tablist" aria-label="Lọc theo trạng thái"></div>
+        <div class="filter-right">
+          <select class="select sm" id="typeFilter" title="Lọc theo loại lệnh"></select>
+          <div class="input-icon search" id="searchWrap"></div>
+        </div>
+      </div>
+      <div class="seg-head">
+        <span class="h-id">#</span><span class="h-src">Văn bản gốc</span><span class="h-tgt">Bản dịch</span>
+      </div>
+      <div class="seg-list" id="segList" tabindex="0" role="listbox" aria-label="Danh sách câu"></div>
+      <div class="pager" id="pager"></div>
+    </main>
+
+    <!-- ============ INSPECTOR ============ -->
+    <section class="inspector" id="inspector" aria-label="Chi tiết câu đang chọn"></section>
+
+    <!-- ============ STATUSBAR ============ -->
+    <footer class="statusbar" id="statusbar"></footer>
+  </div>
+
+  <!-- background job dock (batch translation) -->
+  <div class="job-dock hidden" id="jobDock"></div>
+
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
