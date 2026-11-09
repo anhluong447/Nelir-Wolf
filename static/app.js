@@ -7,7 +7,8 @@ let state = {
   pageSize: 50,
   totalPages: 1,
   totalRows: 0,
-  currentRows: []
+  currentRows: [],
+  fileCount: 0
 };
 
 let batchState = {
@@ -60,6 +61,7 @@ async function loadFiles() {
   try {
     const res = await fetch('/api/files');
     const files = await res.json();
+    state.fileCount = files.length;
     const container = document.getElementById('fileList');
     container.innerHTML = '';
 
@@ -251,7 +253,7 @@ async function saveRowTranslation(id, text) {
 window.translateSingleRow = async function(id) {
   const btn = event?.currentTarget;
   if (btn) btn.disabled = true;
-  showToast(`Đang gọi OpenRouter dịch dòng #${id}...`, 1500);
+  showToast(`Đang gọi AI dịch dòng #${id}...`, 1500);
 
   try {
     const res = await fetch('/api/translate/single', {
@@ -645,7 +647,7 @@ document.getElementById('btnTranslatePage').addEventListener('click', async () =
   const btn = document.getElementById('btnTranslatePage');
   btn.disabled = true;
   btn.innerText = `⏳ Đang dịch (${ids.length} dòng)...`;
-  showToast(`Đang gửi batch ${ids.length} dòng lên OpenRouter...`, 4000);
+  showToast(`Đang gửi ${ids.length} dòng lên AI...`, 4000);
 
   try {
     const res = await fetch('/api/translate/batch', {
@@ -676,7 +678,7 @@ const batchProgressView = document.getElementById('batchProgressView');
 window.openBatchModal = async function(targetFile) {
   batchState.targetFile = targetFile;
   document.getElementById('batchModalTitle').innerText = targetFile ? `🚀 Dịch Full File: ${targetFile.split(/[\\/]/).pop()}` : `🌐 Dịch Full Toàn Bộ Game`;
-  document.getElementById('batchScopeDesc').innerText = targetFile ? `File: ${targetFile}` : `Toàn bộ tất cả 516 file trong game`;
+  document.getElementById('batchScopeDesc').innerText = targetFile ? `File: ${targetFile}` : `Toàn bộ ${formatNum(state.fileCount)} file trong game`;
   
   const container = document.getElementById('batchTypesContainer');
   container.innerHTML = '<div style="color: var(--text-muted); font-size: 12px; grid-column: span 2;">Đang tải danh sách loại...</div>';
