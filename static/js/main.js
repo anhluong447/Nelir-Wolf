@@ -38,6 +38,7 @@ async function loadProjectData() {
     return;
   }
   if (state.file && !state.projectFilesHas?.(state.file)) state.file = null;
+  api.glossary().then((g) => { state.glossary = g.entries || []; emit('glossary-changed'); }).catch(() => {});
   await onScopeChanged();
 }
 
