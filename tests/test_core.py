@@ -93,6 +93,11 @@ class TestExtraction(ProjectFixture):
         self.assertFalse(is_translatable("abc"))
         self.assertFalse(is_translatable("  "))
 
+    def test_punctuation_only_kana_is_not_translatable(self):
+        for s in ("・・・", "ー", "ーーー", "・ー・"):
+            self.assertFalse(is_translatable(s), s)
+        self.assertTrue(is_translatable("ーあー"))
+
     def test_cdatabase_never_extracted(self):
         with connect(self.db) as conn:
             files = {r[0] for r in conn.execute("SELECT file FROM translation_rows")}
@@ -181,6 +186,26 @@ class TestTranslatorText(unittest.TestCase):
 
     def test_clean(self):
         self.assertEqual(clean_translation("Bản dịch: Xin chào\nLưu ý: abc"), "Xin chào")
+
+    def test_clean_keeps_dialogue_starting_with_apology_or_note(self):
+        self.assertEqual(clean_translation("Xin lỗi, tôi đến muộn."), "Xin lỗi, tôi đến muộn.")
+        self.assertEqual(clean_translation("Cảm ơn nhé.\nXin lỗi vì đã làm phiền.\nTạm biệt!"),
+                         "Cảm ơn nhé.\nXin lỗi vì đã làm phiền.\nTạm biệt!")
+        self.assertEqual(clean_translation("Ghi chú: Chỉ dùng được ban đêm."), "Ghi chú: Chỉ dùng được ban đêm.")
+
+    def test_clean_still_cuts_trailing_explanation(self):
+        self.assertEqual(clean_translation("Xin chào\nGhi chú: dịch sát nghĩa"), "Xin chào")
+
+    def test_error_code_reflects_real_cause(self):
+        def fail(code):
+            tr = OpenRouterTranslator(["k"], ["m"])
+            tr._post = lambda key, model, messages: (_ for _ in ()).throw(_AttemptFailed("x", code=code))
+            with self.assertRaises(TranslationAPIError) as ctx:
+                tr.translate_single("こんにちは")
+            return ctx.exception.status_code
+        self.assertEqual(fail(429), 429)
+        self.assertEqual(fail(404), 404)
+        self.assertEqual(fail(401), 401)
 
     def test_glossary_block_only_matching_terms(self):
         block = glossary_block([("マリーカ", "Marika"), ("プシカ", "Pushika")], ["マリーカです"])

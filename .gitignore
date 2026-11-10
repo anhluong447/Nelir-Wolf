@@ -11,6 +11,7 @@ global_settings.db
 
 # Large / generated project data & save files
 dump/
+projects/*/project.json
 projects/*/dump/
 projects/*/dump.tmp/
 projects/*/dump_original/

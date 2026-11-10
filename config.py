@@ -13,6 +13,9 @@ GLOBAL_DB_PATH = os.path.join(DATA_DIR, "global_settings.db")
 
 HOST = "127.0.0.1"
 PORT = 8765
+# Host headers the local server accepts. Anything else (e.g. a DNS-rebinding page
+# resolving its own domain to 127.0.0.1) is rejected. "testserver" is Starlette's TestClient.
+ALLOWED_HOSTS = ["127.0.0.1", "localhost", "[::1]", "testserver"]
 
 # ---------------------------------------------------------------------------
 # Row status semantics (translation_rows.status)

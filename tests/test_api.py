@@ -68,6 +68,17 @@ class TestApi(unittest.TestCase):
         self.assertEqual([r["id"] for r in ctx["after"]], [rows[3]["id"]])
         self.assertEqual(self.client.get("/api/rows/999999/context").status_code, 404)
 
+    def test_clear_by_type_requires_types(self):
+        before = self.client.get("/api/stats").json()
+        r = self.client.post("/api/rows/clear", json={"target": "type", "clear_type": "both"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.client.get("/api/stats").json(), before)
+
+    def test_rejects_foreign_host_header(self):
+        r = self.client.get("/api/settings", headers={"Host": "evil.example.com"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.client.get("/api/settings", headers={"Host": "127.0.0.1:8765"}).status_code, 200)
+
     def test_files_have_review_counts(self):
         files = self.client.get("/api/files").json()
         self.assertTrue(all({"reviewed", "qa", "translatable"} <= set(f) for f in files))

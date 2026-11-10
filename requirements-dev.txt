@@ -1,0 +1,3 @@
+-r requirements.txt
+# Needed by starlette.testclient (tests/test_api.py)
+httpx
