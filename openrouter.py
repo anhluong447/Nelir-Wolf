@@ -23,10 +23,11 @@ class TranslationAPIError(Exception):
 
 
 class _AttemptFailed(Exception):
-    def __init__(self, reason: str, auth: bool = False, bad_format: bool = False):
+    def __init__(self, reason: str, auth: bool = False, bad_format: bool = False, code: int = 502):
         self.reason = reason
         self.auth = auth
         self.bad_format = bad_format
+        self.code = code  # HTTP-like status reported if every attempt fails
         super().__init__(reason)
 
 
@@ -39,12 +40,14 @@ def clean_translation(text: str) -> str:
     if not text:
         return ""
     cleaned = []
-    for line in text.split("\n"):
+    for i, line in enumerate(text.split("\n")):
         l_strip = line.strip().lower()
-        if any(l_strip.startswith(prefix) for prefix in [
+        # Only cut a trailing explanation. The first line is never cut, and plain
+        # apologies ("Xin lỗi ...") are valid dialogue, so only labelled notes count.
+        if i > 0 and any(l_strip.startswith(prefix) for prefix in [
             "lưu ý:", "lưu ý :", "ghi chú:", "ghi chú :", "chú thích:", "chú thích :",
             "note:", "note :", "giải thích:", "giải thích :", "lưu ý quan trọng:", "phần lưu ý:",
-            "xin lỗi", "tôi xin lỗi", "chính xác:", "đính chính:", "sửa lại:", "bản dịch đúng:"
+            "chính xác:", "đính chính:", "sửa lại:", "bản dịch đúng:"
         ]):
             break
         cleaned.append(line)
@@ -263,11 +266,12 @@ class OpenRouterTranslator:
                     except Exception:
                         raise _AttemptFailed("Phản hồi API không đúng định dạng", bad_format=True)
                 if r.status_code in (401, 403):
-                    raise _AttemptFailed(f"Key không hợp lệ hoặc bị từ chối ({r.status_code})", auth=True)
+                    raise _AttemptFailed(f"Key không hợp lệ hoặc bị từ chối ({r.status_code})", auth=True,
+                                         code=r.status_code)
                 if r.status_code == 404:
-                    raise _AttemptFailed(f"Model '{model}' không tồn tại hoặc không hỗ trợ (404)")
+                    raise _AttemptFailed(f"Model '{model}' không tồn tại hoặc không hỗ trợ (404)", code=404)
                 if r.status_code == 429:
-                    raise _AttemptFailed("Rate Limit / Hết Quota (429)")
+                    raise _AttemptFailed("Rate Limit / Hết Quota (429)", code=429)
                 reason = f"Lỗi máy chủ ({r.status_code})"
                 if r.status_code not in (500, 502, 503, 504):
                     raise _AttemptFailed(f"HTTP {r.status_code}")
@@ -280,6 +284,8 @@ class OpenRouterTranslator:
         on_key_rotate = on_key_rotate or self.on_key_rotate
         n_keys = len(self.api_keys)
         last_reason = ""
+        last_code = 502
+        saw_rate_limit = False
         format_only = True
         for k_try in range(n_keys):
             if k_try > 0:
@@ -295,13 +301,17 @@ class OpenRouterTranslator:
                     return parse(content)
                 except _AttemptFailed as f:
                     last_reason = f.reason
+                    last_code = f.code
+                    saw_rate_limit = saw_rate_limit or f.code == 429
                     format_only = format_only and f.bad_format
                     if f.auth:
                         break
                     if p_idx < len(self.models_priority) - 1 and on_fallback:
                         on_fallback(model, self.models_priority[p_idx + 1], p_idx + 2, f.reason)
+        # 429 only if quota was really hit; otherwise report the last real cause
+        # (401 bad key, 404 bad model, 502 network/server/format).
         raise TranslationAPIError(
-            429 if not format_only else 502,
+            429 if saw_rate_limit else last_code,
             f"Tất cả {n_keys} API Key và {len(self.models_priority)} Model đều thất bại ({last_reason})",
             format_only=format_only)
 

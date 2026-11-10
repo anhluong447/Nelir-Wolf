@@ -16,7 +16,7 @@ Nelir WOLF RPG Translator is an automated translation and localization platform 
 
 ### 3. Resilient AI Pipeline with Automatic Quota & Key Rotation
 * **Google Gemini Multi-Key Rotation**: Configure a pool of Google AI Studio API keys. When a key exhausts its daily quota or encounters HTTP 429 (`RESOURCE_EXHAUSTED`), the translation engine automatically shifts to the next available key in the pool.
-* **Tiered Model Fallbacks**: Establish primary and secondary model preferences (Priority 1 through Priority 5). If the primary model encounters rate limits or transient errors, requests transparently fail over to secondary models for that batch, automatically returning to the primary model when quota replenishes.
+* **Tiered Model Fallbacks**: Establish primary and secondary model preferences (Priority 1 through Priority 5). If the primary model encounters rate limits or transient errors, requests transparently fail over to secondary models. Every new batch tries the primary model first again, so it is picked up as soon as its quota replenishes.
 * **Flexible Provider Support**: Fully compatible with OpenAI-compatible endpoints, including OpenRouter, Kaggle compute instances, and local LLM runners (such as Ollama or vLLM).
 
 ### 4. Engine Logic Protection & Automatic Key Locking
@@ -57,11 +57,16 @@ Nelir WOLF RPG Translator is an automated translation and localization platform 
 
 ---
 
+> **Target language:** the prompts, output cleanup and line-splitting heuristics are currently written for **Japanese → Vietnamese**, and the interface is in Vietnamese. Other target languages would need changes in `config.py` and `openrouter.py`.
+
+> **Local only:** the server answers only to `127.0.0.1` / `localhost` Host headers (`config.ALLOWED_HOSTS`) because the API exposes your API keys and runs WolfTL. Do not expose it to a network.
+
 ## System Requirements
 
 * **Operating System**: Windows 10 / 11 (64-bit)
 * **Python**: Version 3.10 or higher
-* **Underlying Tool**: WolfTL (packaged in `bin/`)
+* **Underlying Tool**: WolfTL (packaged in `bin/`). It is a third-party tool by its own author; check its upstream license before redistributing this repository, and replace `bin/WolfTL.exe` with a build you trust if you prefer.
+* **Game data**: the game's `Data` folder must be unpacked (games shipping `Data.wolf` need to be extracted first).
 
 ---
 
@@ -75,7 +80,7 @@ Nelir WOLF RPG Translator is an automated translation and localization platform 
 
 2. **Install required dependencies**:
    ```bash
-   pip install fastapi uvicorn requests python-multipart
+   pip install -r requirements.txt
    ```
 
 3. **Launch the application**:
@@ -97,6 +102,9 @@ Nelir WOLF RPG Translator is an automated translation and localization platform 
 The project includes an automated regression test suite operating on synthetic game dumps without requiring network access or external game binaries:
 
 ```bash
+# Install test dependencies (adds httpx for the API tests)
+pip install -r requirements-dev.txt
+
 # Run unit and integration tests
 python -m unittest discover -s tests -v
 

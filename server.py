@@ -3,11 +3,13 @@ import json
 import os
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import requests
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -22,7 +24,19 @@ from openrouter import OpenRouterTranslator, TranslationAPIError, test_connectio
 from qa import FLAG_LABELS, qa_flags
 
 bridge = WolfBridge(config.DATA_DIR)
-app = FastAPI(title="Nelir Wolf Translator")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if bridge.ctx:
+        bridge.prepare_active_project()
+    yield
+
+
+app = FastAPI(title="Nelir Wolf Translator", lifespan=lifespan)
+# Block DNS-rebinding: the API exposes API keys and runs WolfTL, so only answer
+# requests addressed to the local host names.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.ALLOWED_HOSTS)
 os.makedirs(config.STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
 
@@ -35,12 +49,6 @@ def _no_project(_req: Request, exc: NoActiveProject):
 @app.exception_handler(WolfTLError)
 def _wolftl_error(_req: Request, exc: WolfTLError):
     return JSONResponse(status_code=500, content={"detail": str(exc)})
-
-
-@app.on_event("startup")
-def startup_event():
-    if bridge.ctx:
-        bridge.prepare_active_project()
 
 
 @app.get("/")
@@ -340,6 +348,9 @@ def clear_rows(req: ClearRequest):
         conditions.append("file = ?")
         params.append(req.file)
     elif req.target in ("range", "type", "all"):
+        if req.target == "type" and not req.row_types:
+            # Without this the UPDATE below would have no WHERE clause and wipe every row.
+            raise HTTPException(status_code=400, detail="Cần chọn ít nhất một loại lệnh")
         if req.target != "all" and req.file and req.file != "ALL":
             conditions.append("file = ?")
             params.append(req.file)
@@ -532,7 +543,7 @@ def get_glossary():
 
 @app.post("/api/glossary")
 def set_glossary(req: GlossaryRequest):
-    return {"success": True, "count": bridge.set_glossary([e.dict() for e in req.entries])}
+    return {"success": True, "count": bridge.set_glossary([e.model_dump() for e in req.entries])}
 
 
 # ==========================================

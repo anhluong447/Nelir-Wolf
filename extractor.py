@@ -71,7 +71,9 @@ def is_translatable(s) -> bool:
         return False
     if ('/' in s or '\\' in s) and '.' in s:
         return False  # looks like a file path
-    return any('぀' <= c <= 'ヿ' or '一' <= c <= '鿿' for c in s)
+    # Kana (minus the prolonged-sound mark and middle dot, which are just punctuation)
+    # or CJK ideographs. A string such as "・・・" or "ー" is not worth translating.
+    return any(('぀' <= c <= 'ヿ' and c not in 'ー・') or '一' <= c <= '鿿' for c in s)
 
 
 def _row_type(code_str):
